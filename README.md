@@ -10,7 +10,7 @@ A comprehensive lifestyle discovery platform that combines **real Reddit communi
 
 ## 🚀 Live Demo
 
-**[Try the Live Application]([https://your-deployed-url-here.com](https://nomadai.streamlit.app/))** 
+**[Try the Live Application]((https://nomadai.streamlit.app/))** 
 
 ## ✨ Key Features
 
