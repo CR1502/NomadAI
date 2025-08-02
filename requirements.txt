@@ -1,0 +1,29 @@
+# Core web framework
+streamlit>=1.29.0
+
+# Data processing
+pandas>=2.1.4
+numpy>=1.26.0
+
+# Machine learning and NLP
+scikit-learn>=1.3.2
+textblob>=0.17.1
+spacy>=3.7.0
+
+# API integrations
+googlemaps>=4.10.0
+boto3>=1.34.0
+praw>=7.7.1
+requests>=2.31.0
+
+# Visualization
+plotly>=5.17.0
+
+# Text processing
+fuzzywuzzy>=0.18.0
+python-Levenshtein>=0.21.0
+
+# Utilities
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
+tqdm>=4.66.1

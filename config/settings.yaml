@@ -1,0 +1,49 @@
+# Application Settings
+app:
+  name: "Lifestyle Discovery Assistant"
+  version: "1.0.0"
+  debug: false
+
+# Data Sources
+data_sources:
+  reddit:
+    user_agent: "lifestyle_discovery_bot_v1.0"
+    rate_limit: 60
+  
+  google_places:
+    radius: 8000
+    language: "en"
+
+# Top destinations
+destinations:
+  - "Paris"
+  - "London" 
+  - "New York"
+  - "Tokyo"
+  - "Rome"
+  - "Barcelona"
+  - "Amsterdam"
+  - "Prague"
+  - "Vienna"
+  - "Berlin"
+  - "Istanbul"
+  - "Dubai"
+  - "Bangkok"
+  - "Singapore"
+  - "Hong Kong"
+  - "Sydney"
+  - "Los Angeles"
+  - "Chicago"
+  - "Las Vegas"
+  - "Miami"
+  - "San Francisco"
+  - "Venice"
+  - "Florence"
+  - "Athens"
+  - "Lisbon"
+
+# ML Configuration
+ml:
+  sentiment_threshold: 0.15
+  quality_threshold: 0.3
+  max_posts_per_analysis: 500
