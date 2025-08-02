@@ -136,27 +136,33 @@ streamlit run src/webapp.py
 
 # 📁 Project Structure
 ```bash
-lifestyle-discovery-assistant/
-├── src/
-│   ├── data_pipeline/           # Data extraction and processing
-│   │   ├── reddit_extractor.py  # Reddit API integration with comments
-│   │   ├── data_processor.py    # ML-powered data enhancement
-│   │   └── airflow_dag.py       # Automated data pipeline
-│   ├── models/                  # Machine learning models
-│   │   ├── embedding_model.py   # Text embeddings and similarity
-│   │   └── model_compressor.py  # Model optimization
-│   ├── web_app/                 # Streamlit application
-│   │   ├── enhanced_app.py      # Main application with all features
-│   │   └── components/          # Reusable UI components
-│   └── utils/                   # Helper functions and utilities
+NomadAI/
+├── config/
+│   ├── logging.conf                 # Logging configuration
+│   └── settings.yaml               # Application settings
 ├── data/
-│   ├── by_location/             # Reddit data organized by destination
-│   ├── processed/               # ML-enhanced and cleaned data
-│   └── summaries/               # Analytics and extraction summaries
-├── config/                      # Configuration files
-├── docker/                      # Docker configuration and environment
-├── docs/                        # Documentation and guides
-└── requirements.txt             # Python dependencies
+│   ├── by_location/                # Reddit data organized by destination
+│   ├── processed/                  # ML-enhanced and cleaned data
+│   ├── raw/                        # Raw extracted data
+│   └── summaries/                  # Analytics and extraction summaries
+├── docker/                         # Docker configuration and environment
+├── src/
+│   ├── data_pipeline/
+│   │   ├── data_processor.py       # ML-powered data enhancement
+│   │   └── reddit_extractor.py     # Reddit API integration with comments
+│   ├── models/
+│   │   ├── ai_trip_planner.py      # Smart trip planning algorithms
+│   │   ├── data_quality_enhancer.py # Advanced sentiment analysis & NER
+│   │   └── embedding_model.py      # Text embeddings and similarity
+│   └── utils/
+│       └── helpers.py              # Utility functions and configurations
+├── .streamlit/
+│   └── config.toml                 # Streamlit deployment settings
+├── streamlit_app.py                # Main application (47KB)
+├── main.py                         # Local development entry point
+├── README.md                       # Project documentation
+├── requirements.txt                # Python dependencies
+└── venv/                          # Virtual environment
 ```
 ----
 
