@@ -36,13 +36,13 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Environment variables and secrets
+# Environment variables and secrets (IMPORTANT!)
+docker/.env
 .env
 .env.local
 .streamlit/secrets.toml
-config/api_keys.yaml
 
-# Data files
+# Data files (large files that shouldn't be in git)
 data/raw/
 data/processed/
 data/by_location/
@@ -60,3 +60,13 @@ tmp/
 *.tmp
 test_*.py
 debug_*.py
+
+# API responses and cache
+api_cache/
+*.cache
+
+# Large model files
+*.bin
+*.safetensors
+models/
+*.whl
