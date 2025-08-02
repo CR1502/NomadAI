@@ -6,11 +6,6 @@ A comprehensive lifestyle discovery platform that combines **real Reddit communi
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.29+-green.svg)
 ![AWS](https://img.shields.io/badge/AWS-S3-orange.svg)
 ![Google](https://img.shields.io/badge/Google-Places%20API-red.svg)
-![License](https://img.shields.io/badge/License-MIT-yellow.svg)
-
-## 🚀 Live Demo
-
-**[Try the Live Application]([https://nomadai.streamlit.app/])** 
 
 ## ✨ Key Features
 
