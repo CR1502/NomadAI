@@ -4,22 +4,23 @@ Extracts and stores travel, food, and events data separately by location with co
 """
 
 import praw
-import pandas as pd
 import json
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 import boto3
 from botocore.exceptions import ClientError
 
-from ..utils.helpers import clean_text, categorize_content, generate_hash, validate_data_quality
+from ..utils.helpers import PROJECT_ROOT, clean_text, generate_hash, load_config
+from .storage import location_slug
 
 # Load environment variables
-load_dotenv('docker/.env')
+load_dotenv(PROJECT_ROOT / 'docker' / '.env')
 
 logger = logging.getLogger(__name__)
 
@@ -54,27 +55,24 @@ class LocationPost:
     hash: str
     relevancy_score: float
     top_comments: List[RedditComment]
+    source: str = 'reddit'
 
 
 class ModularRedditExtractor:
     """Extracts lifestyle content by category and location with comments."""
 
-    def __init__(self):
+    def __init__(self, demo_mode: bool = False, data_root: Optional[Path] = None):
         """Initialize Reddit API client and AWS S3."""
         self.reddit = None
         self.s3_client = None
+        self.demo_mode = demo_mode
+        self.data_root = Path(data_root) if data_root is not None else PROJECT_ROOT / 'data'
 
         # S3 bucket name - define this first
         self.bucket_name = os.getenv('S3_BUCKET_NAME', 'lifestyle-discovery-data')
 
         # Top 25 most visited destinations globally
-        self.top_destinations = [
-            "Paris", "London", "New York", "Tokyo", "Rome", "Barcelona",
-            "Amsterdam", "Prague", "Vienna", "Berlin", "Istanbul", "Dubai",
-            "Bangkok", "Singapore", "Hong Kong", "Sydney", "Los Angeles",
-            "Chicago", "Las Vegas", "Miami", "San Francisco", "Venice",
-            "Florence", "Athens", "Lisbon"
-        ]
+        self.top_destinations = load_config()['destinations']
 
         # Category-specific subreddits
         self.category_subreddits = {
@@ -96,8 +94,9 @@ class ModularRedditExtractor:
         }
 
         # Initialize clients after setting up attributes
-        self.setup_reddit_client()
-        self.setup_s3_client()
+        if not demo_mode:
+            self.setup_reddit_client()
+            self.setup_s3_client()
 
     def setup_reddit_client(self):
         """Setup Reddit API client using credentials."""
@@ -239,12 +238,15 @@ class ModularRedditExtractor:
                 location_posts.extend(posts)
 
                 # Rate limiting
-                time.sleep(1)
+                if not self.demo_mode:
+                    time.sleep(1)
 
             except Exception as e:
                 logger.error(f"Error extracting from r/{subreddit_name}: {e}")
                 continue
 
+        # One submission may be returned by more than one search/subreddit.
+        location_posts = list({post.id: post for post in location_posts}.values())
         # Sort by relevancy score
         location_posts.sort(key=lambda x: x.relevancy_score, reverse=True)
 
@@ -260,7 +262,10 @@ class ModularRedditExtractor:
         """Search a subreddit for posts mentioning a specific location with comments."""
 
         if not self.reddit:
-            return self._generate_mock_location_data(subreddit_name, location, limit)
+            if self.demo_mode:
+                return self._generate_mock_location_data(subreddit_name, location, limit)
+            logger.warning('Reddit is unavailable; no live posts were extracted')
+            return []
 
         posts = []
 
@@ -268,11 +273,15 @@ class ModularRedditExtractor:
             subreddit = self.reddit.subreddit(subreddit_name)
 
             # Search for location mentions
-            search_terms = [location, location.lower()]
+            search_terms = [location]
+            seen_ids = set()
 
             for search_term in search_terms:
                 try:
-                    for submission in subreddit.search(search_term, limit=limit//2):
+                    for submission in subreddit.search(search_term, limit=limit):
+                        if submission.id in seen_ids:
+                            continue
+                        seen_ids.add(submission.id)
 
                         # Check if post actually mentions the location
                         full_text = f"{submission.title} {submission.selftext}".lower()
@@ -306,7 +315,7 @@ class ModularRedditExtractor:
                             score=submission.score,
                             num_comments=submission.num_comments,
                             created_utc=submission.created_utc,
-                            url=submission.url,
+                            url=f"https://www.reddit.com{submission.permalink}",
                             category=self._determine_category(subreddit_name),
                             detected_locations=self._extract_locations(full_text),
                             target_location=location,
@@ -374,6 +383,11 @@ class ModularRedditExtractor:
     def save_to_s3(self, posts: List[LocationPost], location: str, category: str):
         """Save posts with comments to S3 bucket organized by location and category."""
 
+        if category not in self.category_subreddits:
+            raise ValueError(f'Invalid category: {category}')
+        if not self.demo_mode and any(post.source != 'reddit' or post.id.startswith('mock_') for post in posts):
+            raise ValueError('Demo posts cannot be written into live storage')
+        posts = list({post.id: post for post in posts}.values())
         # Convert posts to dict format
         posts_data = []
         for post in posts:
@@ -386,7 +400,7 @@ class ModularRedditExtractor:
                     'body': comment.body,
                     'score': comment.score,
                     'created_utc': comment.created_utc,
-                    'timestamp': datetime.fromtimestamp(comment.created_utc).isoformat(),
+                    'timestamp': datetime.fromtimestamp(comment.created_utc, timezone.utc).isoformat(),
                     'is_top_comment': comment.is_top_comment
                 }
                 comments_data.append(comment_dict)
@@ -401,7 +415,7 @@ class ModularRedditExtractor:
                 'score': post.score,
                 'num_comments': post.num_comments,
                 'created_utc': post.created_utc,
-                'timestamp': datetime.fromtimestamp(post.created_utc).isoformat(),
+                'timestamp': datetime.fromtimestamp(post.created_utc, timezone.utc).isoformat(),
                 'url': post.url,
                 'category': post.category,
                 'detected_locations': post.detected_locations,
@@ -409,7 +423,7 @@ class ModularRedditExtractor:
                 'hash': post.hash,
                 'relevancy_score': post.relevancy_score,
                 'top_comments': comments_data,
-                'source': 'reddit'
+                'source': 'demo' if self.demo_mode else post.source
             }
             posts_data.append(post_dict)
 
@@ -417,7 +431,8 @@ class ModularRedditExtractor:
         self._save_locally(posts_data, location, category)
 
         # S3 key structure: location/category/data.json
-        s3_key = f"{location.lower().replace(' ', '_')}/{category}/reddit_posts.json"
+        prefix = 'demo/' if self.demo_mode else ''
+        s3_key = f"{prefix}{location_slug(location)}/{category}/reddit_posts.json"
 
         if self.s3_client:
             try:
@@ -435,10 +450,11 @@ class ModularRedditExtractor:
 
     def _save_locally(self, posts_data: List[Dict], location: str, category: str):
         """Save posts locally as fallback."""
-        local_dir = f"data/by_location/{location.lower().replace(' ', '_')}/{category}"
-        os.makedirs(local_dir, exist_ok=True)
+        root = self.data_root / 'demo' if self.demo_mode else self.data_root
+        local_dir = root / 'by_location' / location_slug(location) / category
+        local_dir.mkdir(parents=True, exist_ok=True)
 
-        filename = f"{local_dir}/reddit_posts.json"
+        filename = local_dir / 'reddit_posts.json'
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(posts_data, f, indent=2, ensure_ascii=False)
 
@@ -448,15 +464,16 @@ class ModularRedditExtractor:
         """Save extraction summary to S3 and locally."""
         summary_data = {
             **summary,
-            'extraction_date': datetime.now().isoformat(),
-            'destinations_processed': len(self.top_destinations)
+            'extraction_date': datetime.now(timezone.utc).isoformat(),
+            'destinations_processed': len(summary.get('by_location', {})),
+            'source': 'demo' if self.demo_mode else 'reddit'
         }
 
         if self.s3_client:
             try:
                 self.s3_client.put_object(
                     Bucket=self.bucket_name,
-                    Key='extraction_summary.json',
+                    Key='demo/extraction_summary.json' if self.demo_mode else 'extraction_summary.json',
                     Body=json.dumps(summary_data, indent=2),
                     ContentType='application/json'
                 )
@@ -465,8 +482,10 @@ class ModularRedditExtractor:
                 logger.error(f"Failed to save summary to S3: {e}")
 
         # Always save locally
-        os.makedirs('data/summaries', exist_ok=True)
-        with open('data/summaries/extraction_summary.json', 'w') as f:
+        root = self.data_root / 'demo' if self.demo_mode else self.data_root
+        summary_path = root / 'summaries' / 'extraction_summary.json'
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        with summary_path.open('w', encoding='utf-8') as f:
             json.dump(summary_data, f, indent=2)
         logger.info("Saved extraction summary locally")
 
@@ -554,42 +573,38 @@ class ModularRedditExtractor:
                 target_location=location,
                 hash=generate_hash(f"{template['title']}_{i}"),
                 relevancy_score=0.8 + (i * 0.05),
-                top_comments=mock_comments
+                top_comments=mock_comments,
+                source='demo'
             )
 
             mock_posts.append(post)
 
-        return mock_posts
+        return mock_posts[:limit]
 
 
-if __name__ == "__main__":
-    # Full extraction for all locations and categories
-    import logging
+def main(argv=None):
+    """Extract real posts, or explicitly generate isolated local demo data."""
+    import argparse
 
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--demo', action='store_true', help='Generate clearly labeled local sample data')
+    parser.add_argument('--location', action='append', choices=load_config()['destinations'])
+    parser.add_argument('--posts-per-subreddit', type=int, default=8)
+    args = parser.parse_args(argv)
+    if args.posts_per_subreddit < 1:
+        parser.error('--posts-per-subreddit must be positive')
     logging.basicConfig(level=logging.INFO)
-
-    extractor = ModularRedditExtractor()
-
-    # Check if clients are working
-    if extractor.reddit:
-        print("Reddit API client is working!")
-    else:
-        print("Reddit API client not working - using mock data")
-
-    if extractor.s3_client:
-        print("S3 client is working!")
-    else:
-        print("S3 client not available - using local storage")
-
-    print(f"\nStarting comprehensive extraction for all {len(extractor.top_destinations)} destinations")
-
+    extractor = ModularRedditExtractor(demo_mode=args.demo)
+    if not args.demo and extractor.reddit is None:
+        parser.error('Reddit credentials are required. Use --demo for isolated sample data.')
+    destinations = args.location or extractor.top_destinations
     extraction_summary = {
         'total_posts': 0,
         'by_location': {},
         'by_category': {'travel': 0, 'food': 0, 'events': 0}
     }
 
-    for location in extractor.top_destinations:
+    for location in destinations:
         print(f"\nProcessing {location}...")
 
         location_summary = {'travel': 0, 'food': 0, 'events': 0}
@@ -600,7 +615,7 @@ if __name__ == "__main__":
             posts = extractor.extract_location_specific_posts(
                 location=location,
                 category=category,
-                posts_per_subreddit=8  # Reasonable number per subreddit
+                posts_per_subreddit=args.posts_per_subreddit
             )
 
             if posts:
@@ -618,28 +633,34 @@ if __name__ == "__main__":
                 print(f"    No {category} posts found for {location}")
 
             # Rate limiting between categories
-            time.sleep(3)
+            if not args.demo:
+                time.sleep(3)
 
         extraction_summary['by_location'][location] = location_summary
         total_for_location = sum(location_summary.values())
         print(f"  Total for {location}: {total_for_location} posts")
 
         # Longer pause between locations to respect Reddit API limits
-        time.sleep(5)
+        if not args.demo:
+            time.sleep(5)
 
     # Save extraction summary
     extractor._save_extraction_summary(extraction_summary)
 
-    print(f"\nExtraction complete!")
+    print("\nExtraction complete!")
     print(f"Total posts extracted: {extraction_summary['total_posts']}")
     print(f"Travel posts: {extraction_summary['by_category']['travel']}")
     print(f"Food posts: {extraction_summary['by_category']['food']}")
     print(f"Events posts: {extraction_summary['by_category']['events']}")
 
-    print(f"\nTop 10 locations by post count:")
+    print("\nTop 10 locations by post count:")
     location_totals = {loc: sum(cats.values()) for loc, cats in extraction_summary['by_location'].items()}
     top_locations = sorted(location_totals.items(), key=lambda x: x[1], reverse=True)[:10]
     for loc, count in top_locations:
         print(f"  {loc}: {count} posts")
 
-    print(f"\nExtraction summary saved to S3 and locally")
+    print("\nLocal extraction summary saved. Any S3 upload status is shown in the logs.")
+
+
+if __name__ == "__main__":
+    main()

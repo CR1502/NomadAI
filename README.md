@@ -1,178 +1,112 @@
-# 🌍 Lifestyle Discovery Assistant - Nomad AI
+# Nomad AI
 
-A comprehensive lifestyle discovery platform that combines **real Reddit community insights** with **verified business data** to provide intelligent travel recommendations. Built with advanced data engineering, machine learning, and a beautiful user interface.
+A Streamlit travel discovery dashboard that combines stored Reddit discussions with Google Places results. The project also contains processing, embedding, and optional AI itinerary modules.
 
-![Python](https://img.shields.io/badge/Python-3.12-blue.svg)
-![Streamlit](https://img.shields.io/badge/Streamlit-1.29+-green.svg)
-![AWS](https://img.shields.io/badge/AWS-S3-orange.svg)
-![Google](https://img.shields.io/badge/Google-Places%20API-red.svg)
+## What works today
 
-## ✨ Key Features
+- Explore 25 configured destinations.
+- Read community posts from local files or S3 without Reddit credentials.
+- Collect fresh Reddit posts explicitly, with results retained for the current session.
+- Classify positive, negative, and neutral/mixed discussions with shared sentiment logic.
+- Display place data without inventing missing ratings or prices.
+- Show illustrative USD budgets calculated from their component costs.
+- Generate clearly labeled local demo posts without API credentials.
+- Process extracted files while retaining comments, URLs, destination metadata, and UTC timestamps.
 
-### 🧠 Smart AI Trip Planner (100% Free)
-- **Personalized itineraries** generated using local ML algorithms
-- **Reddit community insights** as RAG context for recommendations
-- **No external AI API costs** - completely self-contained
-- **User preference customization** (budget, interests, travel style)
+The optional AI planner produces structured itinerary drafts through OpenAI, with a basic local fallback. It and the embedding module are **not yet connected to the dashboard**. Opening hours, travel times, and itinerary feasibility are not verified. Airflow and PostgreSQL are not implemented.
 
-### 📊 Advanced Data Pipeline
-- **2,451+ Reddit posts** extracted from 25 top destinations
-- **Real-time Reddit API integration** with rate limiting and error handling
-- **AWS S3 storage** for scalable data management
-- **Apache Airflow orchestration** for automated data collection
+Budget estimates are illustrative, not current price quotes. Hong Kong is selectable but has no budget estimate yet.
 
-### 🏪 Verified Business Data
-- **Google Places API integration** for restaurants and attractions
-- **Real ratings, prices, and contact information**
-- **Address verification and business hours**
-- **Cross-referenced with community recommendations**
+## Setup
 
-### 🤖 Machine Learning Features
-- **Advanced sentiment analysis** using TextBlob + custom travel sentiment models
-- **Named Entity Recognition** with spaCy for location and business extraction
-- **Duplicate detection** using TF-IDF similarity and fuzzy matching
-- **Quality scoring** with multiple ML factors
+Use Python 3.12 and [uv](https://docs.astral.sh/uv/getting-started/installation/). The committed lockfile fixes dependency versions.
 
-### 💰 Cost Intelligence
-- **Realistic budget estimates** for all 25 destinations
-- **Daily cost breakdowns** (accommodation, food, transport, attractions)
-- **Trip duration planning** (3 days to 2 weeks)
-- **Price-level integration** from Google Places data
-
-## 🗺️ Supported Destinations
-
-**25 Top Global Destinations:**
-Paris • London • New York • Tokyo • Rome • Barcelona • Amsterdam • Prague • Vienna • Berlin • Istanbul • Dubai • Bangkok • Singapore • Hong Kong • Sydney • Los Angeles • Chicago • Las Vegas • Miami • San Francisco • Venice • Florence • Athens • Lisbon
-
-## 🛠️ Technology Stack
-
-### **Backend**
-- **Python 3.12** - Core application logic
-- **Streamlit** - Web application framework
-- **Reddit API (PRAW)** - Community data extraction
-- **Google Places API** - Verified business data
-- **AWS S3** - Cloud data storage
-- **PostgreSQL** - User data and caching
-
-### **Machine Learning**
-- **scikit-learn** - TF-IDF similarity and clustering
-- **TextBlob** - Sentiment analysis
-- **spaCy** - Named entity recognition
-- **sentence-transformers** - Text embeddings
-- **fuzzywuzzy** - Duplicate detection
-
-### **Data Processing**
-- **pandas** - Data manipulation and analysis
-- **numpy** - Numerical computations
-- **Apache Airflow** - Data pipeline orchestration
-- **BeautifulSoup** - Web scraping capabilities
-
-### **Visualization**
-- **Plotly** - Interactive charts and analytics
-- **Custom CSS** - Responsive design and dark theme
-- **Streamlit Components** - Enhanced UI elements
-
-## 📈 Project Statistics
-
-- **2,451+ Reddit Posts** analyzed across all destinations
-- **896 Travel insights** from community experiences
-- **803 Food recommendations** from local experts
-- **752 Event suggestions** for cultural experiences
-- **25 Global destinations** with comprehensive data
-- **100% Free AI** with no external API dependencies
-
-## 🚀 Quick Start
-
-### Prerequisites
-- Python 3.12+
-- Git
-- Docker (optional)
-
-### 1. Clone the Repository
 ```bash
-git clone https://github.com/CR1502/lifestyle_RAG.git
-cd lifestyle-discovery-assistant
+uv sync --locked
+uv run streamlit run streamlit_app.py
 ```
-### 2. Set Up Environment
-```bash
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install dependencies
+Alternatively:
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-
-# Download spaCy model for enhanced features
-python -m spacy download en_core_web_sm
+streamlit run streamlit_app.py
 ```
-### 3. Configure API Keys
-Create docker/.env file with your credentials:
+
+`python main.py` also launches Streamlit using the active environment.
+
+## Try the demo without API keys
+
 ```bash
-# Reddit API (Free)
-REDDIT_CLIENT_ID=your_reddit_client_id
-REDDIT_CLIENT_SECRET=your_reddit_client_secret
-REDDIT_USER_AGENT=lifestyle_discovery_bot_v1.0
-
-# Google Places API
-GOOGLE_PLACES_API_KEY=your_google_places_api_key
-
-# AWS S3 (Free Tier)
-AWS_ACCESS_KEY_ID=your_aws_access_key
-AWS_SECRET_ACCESS_KEY=your_aws_secret_key
-AWS_DEFAULT_REGION=us-east-1
-S3_BUCKET_NAME=your-bucket-name
+uv run nomadai-extract --demo --location Paris
+uv run nomadai-process --demo
+uv run streamlit run streamlit_app.py
 ```
-### 4. Extract Reddit Data
+
+Select Paris and enable **Use demo data** in the sidebar. Demo records are fictional and are saved under `data/demo/`. They never overwrite live data, and normal readers exclude both labeled demo posts and legacy `mock_` records.
+
+## Configure live sources
+
+Copy `.env.example` to `.env` and fill in only the providers you need. Existing `docker/.env` configurations also work. Streamlit Cloud can use its secrets settings. Never commit credentials.
+
+- **Reddit:** approved API access plus `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, and a descriptive user agent. Follow Reddit's [Responsible Builder Policy](https://support.reddithelp.com/hc/en-us/articles/42728983564564-Responsible-Builder-Policy).
+- **Google Places:** `GOOGLE_PLACES_API_KEY`, with the required APIs and billing enabled. This integration currently uses the legacy Google Maps Python client. Review Google's [storage and attribution policies](https://developers.google.com/maps/documentation/places/web-service/policies) before deployment; a cache timeout alone does not establish permission to retain provider content.
+- **S3:** `S3_BUCKET_NAME` and AWS credentials for the collector. The dashboard also supports the standard AWS credential chain and IAM roles.
+- **OpenAI:** optional, for the standalone planner. Install with `uv sync --extra ai`; set `OPENAI_API_KEY` and optionally `OPENAI_MODEL` (default: `gpt-4.1-mini`). API charges may apply.
+
+Collect and process real data:
+
 ```bash
-# Extract fresh Reddit data (takes 30-45 minutes)
-python3 -m src.data_pipeline.reddit_extractor
+uv run nomadai-extract --location Paris
+uv run nomadai-process
 ```
-### 5. Run the Application
+
+Repeat `--location` to select multiple destinations; omit it to collect every configured destination. The collector fails clearly when live credentials are absent. In the dashboard, select fresh data and click **Extract Fresh Reddit Data** to collect; unrelated widget changes reuse the session's previous result.
+
+## Data layout
+
+```text
+data/
+  by_location/<destination>/<category>/reddit_posts.json
+  processed/
+    all_processed_posts.json
+    high_quality_posts.json
+    analytics_summary.json
+  summaries/extraction_summary.json
+  demo/
+    by_location/<destination>/<category>/reddit_posts.json
+    processed/
+    summaries/extraction_summary.json
+```
+
+Categories are travel, food, and events. S3 uses the same destination/category key layout. The app tries S3 first, then local files. `NOMADAI_DATA_DIR` can override the dashboard's local data directory.
+
+Legacy combined JSON files can still be processed with `uv run nomadai-process --input path/to/posts.json`.
+
+## Optional NLP and embeddings
+
 ```bash
-# Start the web application
-streamlit run src/webapp.py
+uv sync --extra ml
+uv run python -m spacy download en_core_web_sm
 ```
------
 
-# 📁 Project Structure
+The embedding model downloads its sentence-transformers weights when initialized. The base dashboard and processor do not download models or NLTK corpora at startup. Named entity recognition falls back to empty entities when the optional spaCy model is unavailable.
+
+## Development checks
+
 ```bash
-NomadAI/
-├── config/
-│   ├── logging.conf                 # Logging configuration
-│   └── settings.yaml               # Application settings
-├── data/
-│   ├── by_location/                # Reddit data organized by destination
-│   ├── processed/                  # ML-enhanced and cleaned data
-│   ├── raw/                        # Raw extracted data
-│   └── summaries/                  # Analytics and extraction summaries
-├── docker/                         # Docker configuration and environment
-├── src/
-│   ├── data_pipeline/
-│   │   ├── data_processor.py       # ML-powered data enhancement
-│   │   └── reddit_extractor.py     # Reddit API integration with comments
-│   ├── models/
-│   │   ├── ai_trip_planner.py      # Smart trip planning algorithms
-│   │   ├── data_quality_enhancer.py # Advanced sentiment analysis & NER
-│   │   └── embedding_model.py      # Text embeddings and similarity
-│   └── utils/
-│       └── helpers.py              # Utility functions and configurations
-├── .streamlit/
-│   └── config.toml                 # Streamlit deployment settings
-├── streamlit_app.py                # Main application (47KB)
-├── main.py                         # Local development entry point
-├── README.md                       # Project documentation
-├── requirements.txt                # Python dependencies
-└── venv/                          # Virtual environment
+uv sync --locked
+uv run ruff check .
+uv run pytest
 ```
-----
 
-## 🙏 Acknowledgments
+Regression tests cover stored-data loading without credentials, refresh actions, demo isolation, pipeline handoffs, preserved evidence, sentiment negation, destination matching, budget totals, unknown provider values, HTML escaping, and structured AI output validation. Tests use synthetic fixtures and mocked providers; no live API requests are made.
 
-Reddit API for providing access to community discussions
-Google Places API for verified business data
-AWS for reliable cloud storage
-Streamlit for the amazing web framework
-spaCy & TextBlob for natural language processing
-Open source community for the incredible tools and libraries
+GitHub Actions runs the same lint and test checks on pushes and pull requests.
 
+## Next milestones
+
+Connect the planner and retrieval modules to user preferences in the dashboard, add evidence-based place matching, validate scheduling constraints, and migrate the Places integration. Measure recommendation relevance and itinerary quality before expanding infrastructure.
 

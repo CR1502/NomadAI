@@ -3,20 +3,15 @@ Advanced data quality enhancement with ML-based sentiment analysis,
 named entity recognition, and duplicate detection.
 """
 
-import spacy
 import pandas as pd
-import numpy as np
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 from textblob import TextBlob
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.cluster import DBSCAN
 import json
 import logging
-import re
-from fuzzywuzzy import fuzz
-from collections import Counter
-import hashlib
+from rapidfuzz import fuzz
+from ..utils.content import classify_sentiment
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +32,8 @@ class DataQualityEnhancer:
     def load_nlp_model(self):
         """Load spaCy NLP model."""
         try:
+            import spacy
+
             self.nlp = spacy.load("en_core_web_sm")
             logger.info("✅ spaCy model loaded successfully")
         except Exception as e:
@@ -53,11 +50,9 @@ class DataQualityEnhancer:
         # Custom travel-specific sentiment
         travel_sentiment = self._calculate_travel_sentiment(text)
 
-        # Combined sentiment score
-        combined_score = (textblob_sentiment + travel_sentiment) / 2
-
-        # Confidence score
-        confidence = abs(combined_score)
+        # Shared classification respects negated cues in both app and pipeline.
+        classified = classify_sentiment(text, textblob_sentiment)
+        combined_score = classified['sentiment_score']
 
         # Label assignment
         if combined_score > 0.15:
@@ -70,51 +65,14 @@ class DataQualityEnhancer:
         return {
             'sentiment_score': combined_score,
             'sentiment_label': label,
-            'confidence': confidence,
+            'sentiment_strength': abs(combined_score),
             'textblob_score': textblob_sentiment,
             'travel_specific_score': travel_sentiment
         }
 
     def _calculate_travel_sentiment(self, text: str) -> float:
         """Calculate travel-specific sentiment score."""
-        text_lower = text.lower()
-
-        # Travel-specific positive words with weights
-        positive_words = {
-            'amazing': 1.0, 'incredible': 1.0, 'fantastic': 0.9, 'beautiful': 0.8,
-            'stunning': 0.9, 'perfect': 0.8, 'love': 0.7, 'great': 0.6,
-            'wonderful': 0.8, 'excellent': 0.8, 'must visit': 1.0, 'highly recommend': 1.0,
-            'hidden gem': 0.9, 'authentic': 0.7, 'local favorite': 0.8, 'worth it': 0.7,
-            'unforgettable': 0.9, 'breathtaking': 1.0, 'magical': 0.8
-        }
-
-        # Travel-specific negative words with weights
-        negative_words = {
-            'tourist trap': -1.0, 'overrated': -0.8, 'overpriced': -0.7, 'crowded': -0.5,
-            'disappointing': -0.9, 'waste of money': -1.0, 'avoid': -1.0, 'terrible': -0.9,
-            'awful': -0.8, 'dirty': -0.6, 'rude': -0.6, 'scam': -1.0,
-            'not worth': -0.8, 'skip': -0.7, 'boring': -0.5
-        }
-
-        score = 0.0
-        word_count = 0
-
-        # Calculate weighted sentiment
-        for word, weight in positive_words.items():
-            if word in text_lower:
-                score += weight
-                word_count += 1
-
-        for word, weight in negative_words.items():
-            if word in text_lower:
-                score += weight
-                word_count += 1
-
-        # Normalize by word count
-        if word_count > 0:
-            score = score / word_count
-
-        return max(-1.0, min(1.0, score))
+        return classify_sentiment(text)['sentiment_score']
 
     def extract_named_entities(self, text: str) -> Dict[str, List[str]]:
         """Extract named entities using spaCy."""
@@ -189,15 +147,27 @@ class DataQualityEnhancer:
                 tfidf_sim = similarity_matrix[i][j]
                 title_sim = fuzz.ratio(posts[i].get('title', ''), posts[j].get('title', '')) / 100.0
 
-                if tfidf_sim > similarity_threshold or title_sim > 0.9:
+                same_id = bool(posts[i].get('id')) and posts[i].get('id') == posts[j].get('id')
+                same_location = posts[i].get('target_location') == posts[j].get('target_location')
+                nonempty_bodies = bool(posts[i].get('text', '').strip() and posts[j].get('text', '').strip())
+                body_sim = fuzz.ratio(posts[i].get('text', ''), posts[j].get('text', '')) / 100.0
+                similar_content = nonempty_bodies and body_sim > similarity_threshold and (
+                    tfidf_sim > similarity_threshold or title_sim > 0.9
+                )
+                if same_location and (same_id or similar_content):
                     duplicates.add(j)
                     similar_posts.append(posts[j])
 
             # Merge similar posts (keep highest scoring one, combine insights)
             if len(similar_posts) > 1:
-                best_post = max(similar_posts, key=lambda x: x.get('score', 0))
+                best_post = max(similar_posts, key=lambda x: x.get('score', 0)).copy()
                 best_post['duplicate_count'] = len(similar_posts)
-                best_post['combined_score'] = sum(p.get('score', 0) for p in similar_posts)
+                # Re-fetching the same submission is not independent engagement.
+                scores_by_id = {}
+                for index, post in enumerate(similar_posts):
+                    key = post.get('id') or f'unknown_{index}'
+                    scores_by_id[key] = max(scores_by_id.get(key, 0), post.get('score', 0))
+                best_post['combined_score'] = sum(scores_by_id.values())
                 unique_posts.append(best_post)
             else:
                 current_post['duplicate_count'] = 1
@@ -243,9 +213,9 @@ class DataQualityEnhancer:
         elif num_comments >= 5:
             score += 5
 
-        # Sentiment quality (0-20 points)
-        sentiment_confidence = enhanced_sentiment.get('confidence', 0)
-        score += sentiment_confidence * 20
+        # Sentiment strength (0-20 points), not calibrated confidence.
+        sentiment_strength = enhanced_sentiment.get('sentiment_strength', enhanced_sentiment.get('confidence', 0))
+        score += sentiment_strength * 20
 
         # Entity richness (0-10 points)
         total_entities = sum(len(entity_list) for entity_list in entities.values())
@@ -323,7 +293,7 @@ if __name__ == "__main__":
     # Show sample enhancement
     if enhanced_posts:
         sample = enhanced_posts[0]
-        print(f"\nSample enhancement:")
+        print("\nSample enhancement:")
         print(f"Title: {sample['title']}")
         print(f"Enhanced sentiment: {sample['enhanced_sentiment']}")
         print(f"Entities found: {sample['entities']}")

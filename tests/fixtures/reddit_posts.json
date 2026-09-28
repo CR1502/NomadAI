@@ -1,0 +1,37 @@
+[
+  {
+    "id": "fixture_positive",
+    "title": "Paris local food guide",
+    "text": "I highly recommend the local food markets in Paris. The food was amazing and the service was excellent.",
+    "summary": "A positive synthetic test review of Paris food markets.",
+    "subreddit": "travel",
+    "author": "test_author",
+    "score": 150,
+    "num_comments": 25,
+    "timestamp": "2026-01-01T10:00:00+00:00",
+    "created_utc": 1767261600,
+    "url": "https://www.reddit.com/r/travel/comments/fixture_positive",
+    "category": "food",
+    "target_location": "Paris",
+    "detected_locations": ["Paris"],
+    "relevancy_score": 0.8,
+    "source": "reddit",
+    "top_comments": [{"author": "test_commenter", "body": "Visit the market early in the morning.", "score": 20}]
+  },
+  {
+    "id": "fixture_negative",
+    "title": "Paris restaurant experience",
+    "text": "I do not recommend this restaurant in Paris. The food was not worth it and the service was terrible.",
+    "subreddit": "travel",
+    "author": "test_author",
+    "score": 30,
+    "num_comments": 5,
+    "timestamp": "2026-01-02T10:00:00+00:00",
+    "url": "https://www.reddit.com/r/travel/comments/fixture_negative",
+    "category": "food",
+    "target_location": "Paris",
+    "relevancy_score": 0.7,
+    "source": "reddit",
+    "top_comments": []
+  }
+]

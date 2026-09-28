@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nomadai"
+version = "0.2.0"
+description = "Travel discovery using community evidence and place data"
+requires-python = ">=3.12"
+dynamic = ["dependencies"]
+
+[project.optional-dependencies]
+ai = ["openai>=1.66.0,<3"]
+ml = ["spacy>=3.7,<4", "sentence-transformers>=3,<6"]
+
+[project.scripts]
+nomadai-extract = "src.data_pipeline.reddit_extractor:main"
+nomadai-process = "src.data_pipeline.data_processor:main"
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+namespaces = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["F", "E9"]
