@@ -6,8 +6,7 @@ Uses sentence-transformers for semantic similarity search.
 import json
 import logging
 import numpy as np
-import pandas as pd
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 from sentence_transformers import SentenceTransformer
 import pickle
 import os
@@ -279,7 +278,7 @@ if __name__ == "__main__":
             print(f"     Similarity: {result['similarity']:.3f} | Quality: {metadata['quality_score']:.1f}")
 
     # Show stats
-    print(f"\n=== Embeddings Statistics ===")
+    print("\n=== Embeddings Statistics ===")
     stats = embedding_model.get_embeddings_stats()
     for key, value in stats.items():
         print(f"{key}: {value}")

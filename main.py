@@ -1,16 +1,14 @@
-# This is a sample Python script.
+"""Launch the Streamlit app with the active Python environment."""
 
-# Press ⌃R to execute it or replace it with your code.
-# Press Double ⇧ to search everywhere for classes, files, tool windows, actions, and settings.
-
-
-def print_hi(name):
-    # Use a breakpoint in the code line below to debug your script.
-    print(f'Hi, {name}')  # Press ⌘F8 to toggle the breakpoint.
+import subprocess
+import sys
+from pathlib import Path
 
 
-# Press the green button in the gutter to run the script.
+def main():
+    app_path = Path(__file__).resolve().parent / 'streamlit_app.py'
+    return subprocess.call([sys.executable, '-m', 'streamlit', 'run', str(app_path), *sys.argv[1:]])
+
+
 if __name__ == '__main__':
-    print_hi('PyCharm')
-
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
+    raise SystemExit(main())

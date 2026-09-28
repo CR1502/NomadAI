@@ -5,16 +5,24 @@ Utility helper functions for the Lifestyle Discovery Assistant.
 import re
 import hashlib
 import logging
-from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
+from pathlib import Path
+from typing import List, Dict, Any
+from datetime import datetime
 import yaml
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def load_config(config_path: str = "config/settings.yaml") -> Dict[str, Any]:
     """Load configuration from YAML file."""
+    path = Path(config_path)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
     try:
-        with open(config_path, 'r') as file:
-            config = yaml.safe_load(file)
+        with path.open(encoding='utf-8') as file:
+            config = yaml.safe_load(file) or {}
+        if not isinstance(config, dict):
+            raise ValueError(f"Configuration {path} must be a mapping")
         return config
     except FileNotFoundError:
         logging.error(f"Configuration file {config_path} not found")
@@ -143,7 +151,12 @@ def setup_logging(config_path: str = "config/logging.conf"):
     import logging.config
 
     try:
-        logging.config.fileConfig(config_path)
+        (PROJECT_ROOT / 'logs').mkdir(exist_ok=True)
+        logging.config.fileConfig(
+            PROJECT_ROOT / config_path,
+            defaults={'log_path': str(PROJECT_ROOT / 'logs' / 'app.log')},
+            disable_existing_loggers=False,
+        )
     except FileNotFoundError:
         # Fallback to basic logging if config file not found
         logging.basicConfig(

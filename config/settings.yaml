@@ -45,5 +45,32 @@ destinations:
 # ML Configuration
 ml:
   sentiment_threshold: 0.15
-  quality_threshold: 0.3
+  quality_threshold: 40
   max_posts_per_analysis: 500
+
+# Illustrative daily estimates in USD, not live quotes. Totals are derived.
+costs:
+  Paris: {accommodation: 120, food: 60, transport: 25, attractions: 30}
+  London: {accommodation: 150, food: 70, transport: 30, attractions: 35}
+  New York: {accommodation: 180, food: 80, transport: 35, attractions: 40}
+  Tokyo: {accommodation: 100, food: 50, transport: 20, attractions: 25}
+  Rome: {accommodation: 90, food: 45, transport: 20, attractions: 25}
+  Barcelona: {accommodation: 85, food: 40, transport: 18, attractions: 22}
+  Amsterdam: {accommodation: 110, food: 55, transport: 25, attractions: 28}
+  Prague: {accommodation: 50, food: 25, transport: 12, attractions: 15}
+  Vienna: {accommodation: 80, food: 40, transport: 18, attractions: 22}
+  Berlin: {accommodation: 70, food: 35, transport: 15, attractions: 20}
+  Istanbul: {accommodation: 45, food: 20, transport: 8, attractions: 12}
+  Dubai: {accommodation: 130, food: 65, transport: 25, attractions: 60}
+  Bangkok: {accommodation: 40, food: 15, transport: 8, attractions: 10}
+  Singapore: {accommodation: 95, food: 45, transport: 20, attractions: 25}
+  Sydney: {accommodation: 130, food: 65, transport: 30, attractions: 60}
+  Los Angeles: {accommodation: 140, food: 70, transport: 40, attractions: 35}
+  Chicago: {accommodation: 120, food: 60, transport: 25, attractions: 30}
+  Las Vegas: {accommodation: 90, food: 60, transport: 20, attractions: 50}
+  Miami: {accommodation: 130, food: 65, transport: 25, attractions: 30}
+  San Francisco: {accommodation: 160, food: 75, transport: 30, attractions: 35}
+  Venice: {accommodation: 110, food: 50, transport: 20, attractions: 25}
+  Florence: {accommodation: 95, food: 45, transport: 15, attractions: 22}
+  Athens: {accommodation: 60, food: 30, transport: 12, attractions: 18}
+  Lisbon: {accommodation: 70, food: 35, transport: 15, attractions: 20}

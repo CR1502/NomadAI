@@ -1,6 +1,6 @@
 """
 Nomad AI - Lifestyle Discovery Assistant
-Complete single-file application for Streamlit Cloud deployment.
+Streamlit dashboard backed by shared ingestion and content logic.
 """
 
 import streamlit as st
@@ -8,10 +8,15 @@ import pandas as pd
 import plotly.express as px
 import json
 import os
-import re
 import time
-from datetime import datetime
-from typing import Dict, List, Any
+from datetime import datetime, timezone
+from pathlib import Path
+from math import log1p
+from typing import Dict, List
+
+from src.data_pipeline.storage import deduplicate_posts, load_location_posts, location_slug, validate_extraction_summary
+from src.utils.content import calculate_costs, classify_sentiment, normalize_place, safe_html, safe_url
+from src.utils.helpers import PROJECT_ROOT, load_config
 
 # Import optional dependencies with error handling
 try:
@@ -306,40 +311,12 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Configuration
-DESTINATIONS = [
-    "Paris", "London", "New York", "Tokyo", "Rome", "Barcelona",
-    "Amsterdam", "Berlin", "Prague", "Vienna", "Dubai", "Bangkok",
-    "Singapore", "Sydney", "Los Angeles", "Miami", "Venice",
-    "Florence", "Athens", "Lisbon", "Istanbul", "Chicago", "Las Vegas"
-]
-
-# Cost data for all destinations
-COST_DATA = {
-    "Paris": {"daily": 235, "accommodation": 120, "food": 60, "transport": 25, "attractions": 30},
-    "London": {"daily": 285, "accommodation": 150, "food": 70, "transport": 30, "attractions": 35},
-    "Tokyo": {"daily": 195, "accommodation": 100, "food": 50, "transport": 20, "attractions": 25},
-    "New York": {"daily": 335, "accommodation": 180, "food": 80, "transport": 35, "attractions": 40},
-    "Rome": {"daily": 180, "accommodation": 90, "food": 45, "transport": 20, "attractions": 25},
-    "Barcelona": {"daily": 165, "accommodation": 85, "food": 40, "transport": 18, "attractions": 22},
-    "Amsterdam": {"daily": 218, "accommodation": 110, "food": 55, "transport": 25, "attractions": 28},
-    "Berlin": {"daily": 140, "accommodation": 70, "food": 35, "transport": 15, "attractions": 20},
-    "Prague": {"daily": 102, "accommodation": 50, "food": 25, "transport": 12, "attractions": 15},
-    "Vienna": {"daily": 158, "accommodation": 80, "food": 40, "transport": 18, "attractions": 22},
-    "Dubai": {"daily": 280, "accommodation": 130, "food": 65, "transport": 25, "attractions": 60},
-    "Bangkok": {"daily": 73, "accommodation": 40, "food": 15, "transport": 8, "attractions": 10},
-    "Singapore": {"daily": 185, "accommodation": 95, "food": 45, "transport": 20, "attractions": 25},
-    "Sydney": {"daily": 285, "accommodation": 130, "food": 65, "transport": 30, "attractions": 60},
-    "Istanbul": {"daily": 125, "accommodation": 45, "food": 20, "transport": 8, "attractions": 12},
-    "Athens": {"daily": 118, "accommodation": 60, "food": 30, "transport": 12, "attractions": 18},
-    "Lisbon": {"daily": 135, "accommodation": 70, "food": 35, "transport": 15, "attractions": 20},
-    "Venice": {"daily": 220, "accommodation": 110, "food": 50, "transport": 20, "attractions": 25},
-    "Florence": {"daily": 185, "accommodation": 95, "food": 45, "transport": 15, "attractions": 22},
-    "Chicago": {"daily": 245, "accommodation": 120, "food": 60, "transport": 25, "attractions": 30},
-    "Las Vegas": {"daily": 210, "accommodation": 90, "food": 60, "transport": 20, "attractions": 50},
-    "Los Angeles": {"daily": 275, "accommodation": 140, "food": 70, "transport": 40, "attractions": 35},
-    "Miami": {"daily": 260, "accommodation": 130, "food": 65, "transport": 25, "attractions": 30},
-    "San Francisco": {"daily": 315, "accommodation": 160, "food": 75, "transport": 30, "attractions": 35},
-}
+APP_CONFIG = load_config()
+DESTINATIONS = APP_CONFIG['destinations']
+COST_DATA = {location: calculate_costs(costs) for location, costs in APP_CONFIG['costs'].items()}
+if HAS_DOTENV:
+    load_dotenv(PROJECT_ROOT / '.env')
+    load_dotenv(PROJECT_ROOT / 'docker' / '.env')
 
 def get_environment_value(key: str) -> str:
     """Get environment variable from Streamlit secrets or docker/.env."""
@@ -354,7 +331,7 @@ def get_environment_value(key: str) -> str:
     # Try loading from docker/.env (for local development)
     if HAS_DOTENV:
         try:
-            load_dotenv('docker/.env')
+            load_dotenv(PROJECT_ROOT / 'docker' / '.env')
             value = os.getenv(key)
             if value:
                 return value
@@ -379,9 +356,7 @@ def check_api_connections():
     api_status['google'] = bool(google_key and HAS_GOOGLE_MAPS)
 
     # Check AWS S3
-    aws_key = get_environment_value("AWS_ACCESS_KEY_ID")
-    aws_secret = get_environment_value("AWS_SECRET_ACCESS_KEY")
-    api_status['aws'] = bool(aws_key and aws_secret and HAS_AWS)
+    api_status['aws'] = bool(get_environment_value('S3_BUCKET_NAME') and HAS_AWS)
 
     return api_status
 
@@ -394,15 +369,20 @@ def get_s3_client():
     aws_key = get_environment_value("AWS_ACCESS_KEY_ID")
     aws_secret = get_environment_value("AWS_SECRET_ACCESS_KEY")
 
-    if not aws_key or not aws_secret:
+    if not get_environment_value('S3_BUCKET_NAME'):
         return None
 
     try:
+        credentials = {}
+        if aws_key and aws_secret:
+            credentials = {'aws_access_key_id': aws_key, 'aws_secret_access_key': aws_secret}
+            token = get_environment_value('AWS_SESSION_TOKEN')
+            if token:
+                credentials['aws_session_token'] = token
         return boto3.client(
             's3',
-            aws_access_key_id=aws_key,
-            aws_secret_access_key=aws_secret,
-            region_name=get_environment_value("AWS_DEFAULT_REGION") or 'us-east-1'
+            region_name=get_environment_value("AWS_DEFAULT_REGION") or 'us-east-1',
+            **credentials,
         )
     except Exception as e:
         st.error(f"S3 client initialization failed: {e}")
@@ -448,7 +428,7 @@ def get_google_places_client():
         st.error(f"Google Places client initialization failed: {e}")
         return None
 
-@st.cache_data
+@st.cache_data(ttl=300)
 def get_google_places_data(location: str):
     """Get real Google Places data."""
     gmaps = get_google_places_client()
@@ -493,21 +473,10 @@ def get_google_places_data(location: str):
                 )
 
                 detail_info = details.get('result', {})
-                price_level = place.get('price_level', 2)
-                price_symbols = ['$', '$', '$$', '$$$', '$$$$'][min(price_level, 4)]
-
-                restaurants.append({
-                    'name': place['name'],
-                    'rating': detail_info.get('rating', place.get('rating', 4.0)),
-                    'user_ratings_total': detail_info.get('user_ratings_total', 0),
-                    'price': price_symbols,
-                    'price_level': price_level,
-                    'address': detail_info.get('formatted_address', place.get('vicinity', 'Address not available')),
-                    'website': detail_info.get('website', 'Not available'),
-                    'phone': detail_info.get('formatted_phone_number', 'Not available')
-                })
-            except Exception:
-                continue
+                restaurants.append(normalize_place(place, detail_info))
+            except Exception as error:
+                st.warning(f"Could not load restaurant details for {place.get('name', 'a place')}: {error}")
+                restaurants.append(normalize_place(place))
 
         # Process attractions with detailed information
         attractions = []
@@ -521,16 +490,10 @@ def get_google_places_data(location: str):
 
                 detail_info = details.get('result', {})
 
-                attractions.append({
-                    'name': place['name'],
-                    'rating': detail_info.get('rating', place.get('rating', 4.0)),
-                    'user_ratings_total': detail_info.get('user_ratings_total', 0),
-                    'address': detail_info.get('formatted_address', place.get('vicinity', 'Address not available')),
-                    'website': detail_info.get('website', 'Not available'),
-                    'phone': detail_info.get('formatted_phone_number', 'Not available')
-                })
-            except Exception:
-                continue
+                attractions.append(normalize_place(place, detail_info))
+            except Exception as error:
+                st.warning(f"Could not load attraction details for {place.get('name', 'a place')}: {error}")
+                attractions.append(normalize_place(place))
 
         return {'restaurants': restaurants, 'attractions': attractions}
 
@@ -538,7 +501,7 @@ def get_google_places_data(location: str):
         st.error(f"Google Places API error: {e}")
         return None
 
-@st.cache_data
+@st.cache_data(ttl=300)
 def load_reddit_data_from_s3(location: str):
     """Load real Reddit data from S3 storage."""
     s3_client = get_s3_client()
@@ -554,17 +517,38 @@ def load_reddit_data_from_s3(location: str):
     # Load travel and food data
     for category in ['travel', 'food', 'events']:
         try:
-            s3_key = f"{location.lower().replace(' ', '_')}/{category}/reddit_posts.json"
+            s3_key = f"{location_slug(location)}/{category}/reddit_posts.json"
             response = s3_client.get_object(Bucket=bucket_name, Key=s3_key)
             posts = json.loads(response['Body'].read().decode('utf-8'))
-            all_posts.extend(posts)
+            if not isinstance(posts, list) or any(not isinstance(post, dict) for post in posts):
+                raise ValueError('Stored posts must be a JSON list of post objects')
+            all_posts.extend(deduplicate_posts(posts))
         except ClientError as e:
             if e.response['Error']['Code'] != 'NoSuchKey':
                 st.warning(f"Error loading {category} data for {location}")
-        except Exception:
-            continue
+        except Exception as error:
+            st.warning(f"Could not read stored {category} posts for {location}: {error}")
 
-    return all_posts
+    return deduplicate_posts(all_posts)
+
+
+def get_data_directory() -> Path:
+    return Path(get_environment_value('NOMADAI_DATA_DIR') or PROJECT_ROOT / 'data')
+
+
+@st.cache_data(ttl=300)
+def load_stored_reddit_data(location: str, data_directory: str, demo_mode: bool = False):
+    """Read S3 or local data without requiring a Reddit API connection."""
+    if not demo_mode:
+        posts = load_reddit_data_from_s3(location)
+        if posts:
+            return posts
+    root = Path(data_directory) / 'demo' if demo_mode else Path(data_directory)
+    try:
+        return load_location_posts(location, root / 'by_location', include_demo=demo_mode)
+    except (OSError, ValueError) as error:
+        st.warning(f'Could not load local posts: {error}')
+        return []
 
 def extract_fresh_reddit_data(location: str, max_posts: int = 30):
     """Extract fresh Reddit data for a location using real Reddit API."""
@@ -573,6 +557,7 @@ def extract_fresh_reddit_data(location: str, max_posts: int = 30):
         return []
 
     posts = []
+    seen_ids = set()
     subreddits = ['travel', 'solotravel', 'backpacking', 'food', 'AskCulinary', 'streetfood']
 
     progress_bar = st.progress(0)
@@ -586,9 +571,13 @@ def extract_fresh_reddit_data(location: str, max_posts: int = 30):
                 subreddit = reddit_client.subreddit(subreddit_name)
 
                 # Search for location mentions
-                search_results = list(subreddit.search(location, limit=max_posts//len(subreddits)))
+                quota, remainder = divmod(max_posts, len(subreddits))
+                search_results = list(subreddit.search(location, limit=quota + (idx < remainder)))
 
                 for submission in search_results:
+                    if submission.id in seen_ids:
+                        continue
+                    seen_ids.add(submission.id)
                     full_text = f"{submission.title} {submission.selftext}".lower()
 
                     # Check if location is actually mentioned meaningfully
@@ -643,11 +632,12 @@ def extract_fresh_reddit_data(location: str, max_posts: int = 30):
                         'score': submission.score,
                         'num_comments': submission.num_comments,
                         'url': f"https://reddit.com{submission.permalink}",
-                        'relevancy_score': relevancy,
+                        'relevancy_score': min(relevancy, 1.0),
                         'top_comments': comments,
                         'target_location': location,
-                        'timestamp': datetime.fromtimestamp(submission.created_utc).isoformat(),
-                        'category': 'travel' if subreddit_name in ['travel', 'solotravel', 'backpacking'] else 'food'
+                        'timestamp': datetime.fromtimestamp(submission.created_utc, timezone.utc).isoformat(),
+                        'category': 'travel' if subreddit_name in ['travel', 'solotravel', 'backpacking'] else 'food',
+                        'source': 'reddit',
                     }
 
                     posts.append(post_data)
@@ -676,91 +666,42 @@ def extract_fresh_reddit_data(location: str, max_posts: int = 30):
 
 def analyze_reddit_sentiment(posts: List[Dict]) -> Dict[str, List[Dict]]:
     """Advanced sentiment analysis of Reddit posts."""
-    positive_posts = []
-    negative_posts = []
-
-    # Enhanced sentiment indicators
-    positive_indicators = [
-        'amazing', 'incredible', 'fantastic', 'love', 'perfect', 'recommend',
-        'beautiful', 'wonderful', 'excellent', 'must visit', 'hidden gem',
-        'authentic', 'worth it', 'favorite', 'brilliant', 'stunning',
-        'unforgettable', 'magical', 'breathtaking', 'outstanding'
-    ]
-
-    negative_indicators = [
-        'avoid', 'terrible', 'worst', 'disappointing', 'overrated',
-        'tourist trap', 'waste of money', 'not worth', 'skip', 'bad',
-        'awful', 'overpriced', 'crowded', 'dirty', 'rude', 'scam',
-        'boring', 'mediocre', 'expensive', 'poor service'
-    ]
-
+    groups = {'positive': [], 'negative': [], 'neutral': []}
     for post in posts:
-        text = f"{post.get('title', '')} {post.get('text', '')} {post.get('summary', '')}".lower()
-
-        # TextBlob sentiment analysis if available
-        sentiment_score = 0
+        text = f"{post.get('title', '')} {post.get('text') or post.get('summary', '')}"
+        polarity = 0.0
         if HAS_TEXTBLOB:
             try:
-                blob = TextBlob(text)
-                sentiment_score = blob.sentiment.polarity
-            except:
-                sentiment_score = 0
+                polarity = TextBlob(text).sentiment.polarity
+            except Exception:
+                pass
+        sentiment = classify_sentiment(text, polarity)
+        groups[sentiment['sentiment_label']].append({**post, **sentiment})
 
-        # Count sentiment indicators
-        pos_count = sum(1 for word in positive_indicators if word in text)
-        neg_count = sum(1 for word in negative_indicators if word in text)
+    def rank(post):
+        engagement = min(log1p(max(post.get('score', 0), 0)) / log1p(1000), 1.0)
+        return 0.6 * post.get('relevancy_score', 0) + 0.3 * engagement + 0.1 * abs(post['sentiment_score'])
 
-        # Enhanced classification with multiple criteria
-        if (sentiment_score > 0.1 and pos_count > neg_count) or pos_count >= 2:
-            post['sentiment_score'] = sentiment_score
-            post['positive_indicators'] = pos_count
-            post['sentiment_confidence'] = abs(sentiment_score) + (pos_count * 0.1)
-            positive_posts.append(post)
-        elif (sentiment_score < -0.1 and neg_count > pos_count) or neg_count >= 1:
-            post['sentiment_score'] = sentiment_score
-            post['negative_indicators'] = neg_count
-            post['sentiment_confidence'] = abs(sentiment_score) + (neg_count * 0.1)
-            negative_posts.append(post)
-
-    # Sort by combined relevancy, score, and sentiment confidence
-    positive_posts.sort(
-        key=lambda x: (
-            x.get('relevancy_score', 0) * 100 +
-            x.get('score', 0) +
-            x.get('sentiment_confidence', 0) * 50
-        ),
-        reverse=True
-    )
-
-    negative_posts.sort(
-        key=lambda x: (
-            x.get('relevancy_score', 0) * 100 +
-            x.get('score', 0) +
-            x.get('sentiment_confidence', 0) * 50
-        ),
-        reverse=True
-    )
-
-    return {
-        'positive': positive_posts[:5],
-        'negative': negative_posts[:3]
-    }
+    for group in groups.values():
+        group.sort(key=rank, reverse=True)
+    return {'positive': groups['positive'][:5], 'negative': groups['negative'][:3], 'neutral': groups['neutral'][:3]}
 
 def display_restaurants(restaurants: List[Dict], location: str, data_source: str = "Google Places"):
     """Display restaurant recommendations with enhanced details."""
-    st.markdown(f'<div class="section-header">🍽️ Top Restaurants <span class="data-source-badge">{data_source}</span></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="section-header">🍽️ Restaurants <span class="data-source-badge">{safe_html(data_source)}</span></div>', unsafe_allow_html=True)
 
     if not restaurants:
         st.warning("No restaurant data available for this location.")
         return
 
     for i, restaurant in enumerate(restaurants, 1):
-        rating = restaurant.get('rating', 4.0)
-        price = restaurant.get('price', '$$')
-        address = restaurant.get('address', 'Address not available')
-        website = restaurant.get('website', 'Not available')
-        phone = restaurant.get('phone', 'Not available')
-        total_ratings = restaurant.get('user_ratings_total', 0)
+        rating = restaurant.get('rating')
+        rating_display = f'⭐ {rating:.1f}' if rating is not None else 'Rating unavailable'
+        price = safe_html(restaurant.get('price', 'Price unavailable'))
+        address = safe_html(restaurant.get('address', 'Address not available'))
+        website = safe_html(restaurant.get('website', 'Not available'))
+        phone = safe_html(restaurant.get('phone', 'Not available'))
+        total_ratings = restaurant.get('user_ratings_total') or 0
 
         # Format website display
         website_display = website
@@ -769,9 +710,9 @@ def display_restaurants(restaurants: List[Dict], location: str, data_source: str
 
         st.markdown(f"""
         <div class="recommendation-card">
-            <div class="place-name">{i}. {restaurant['name']}</div>
+            <div class="place-name">{i}. {safe_html(restaurant['name'])}</div>
             <div class="place-details">
-                <span class="rating-badge">⭐ {rating:.1f}</span>
+                <span class="rating-badge">{rating_display}</span>
                 <span class="price-badge">{price}</span>
                 {f'<small style="color: #666;">({total_ratings:,} reviews)</small>' if total_ratings > 0 else ''}<br><br>
                 <strong>📍 Address:</strong> {address}<br>
@@ -783,18 +724,19 @@ def display_restaurants(restaurants: List[Dict], location: str, data_source: str
 
 def display_attractions(attractions: List[Dict], location: str, data_source: str = "Google Places"):
     """Display attraction recommendations with enhanced details."""
-    st.markdown(f'<div class="section-header">🏛️ Top Attractions <span class="data-source-badge">{data_source}</span></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="section-header">🏛️ Attractions <span class="data-source-badge">{safe_html(data_source)}</span></div>', unsafe_allow_html=True)
 
     if not attractions:
         st.warning("No attraction data available for this location.")
         return
 
     for i, attraction in enumerate(attractions, 1):
-        rating = attraction.get('rating', 4.0)
-        address = attraction.get('address', 'Address not available')
-        website = attraction.get('website', 'Not available')
-        phone = attraction.get('phone', 'Not available')
-        total_ratings = attraction.get('user_ratings_total', 0)
+        rating = attraction.get('rating')
+        rating_display = f'⭐ {rating:.1f}' if rating is not None else 'Rating unavailable'
+        address = safe_html(attraction.get('address', 'Address not available'))
+        website = safe_html(attraction.get('website', 'Not available'))
+        phone = safe_html(attraction.get('phone', 'Not available'))
+        total_ratings = attraction.get('user_ratings_total') or 0
 
         # Format website display
         website_display = website
@@ -803,9 +745,9 @@ def display_attractions(attractions: List[Dict], location: str, data_source: str
 
         st.markdown(f"""
         <div class="recommendation-card">
-            <div class="place-name">{i}. {attraction['name']}</div>
+            <div class="place-name">{i}. {safe_html(attraction['name'])}</div>
             <div class="place-details">
-                <span class="rating-badge">⭐ {rating:.1f}</span>
+                <span class="rating-badge">{rating_display}</span>
                 {f'<small style="color: #666;">({total_ratings:,} reviews)</small>' if total_ratings > 0 else ''}<br><br>
                 <strong>📍 Address:</strong> {address}<br>
                 <strong>📞 Phone:</strong> {phone}<br>
@@ -819,22 +761,22 @@ def display_reddit_insights(sentiment_data: Dict[str, List[Dict]], location: str
 
     # Positive posts
     if sentiment_data.get('positive'):
-        st.markdown(f'<div class="section-header">✅ Community Favorites <span class="data-source-badge">{data_source}</span></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="section-header">✅ Community Favorites <span class="data-source-badge">{safe_html(data_source)}</span></div>', unsafe_allow_html=True)
 
         for i, post in enumerate(sentiment_data['positive'], 1):
-            reddit_url = post.get('url', '#')
+            reddit_url = safe_url(post.get('url'))
 
             st.markdown(f"""
             <div class="reddit-post-card positive-post">
-                <div class="post-title">👍 {post['title']}</div>
-                <div class="post-content">{post.get('text', post.get('summary', ''))}</div>
+                <div class="post-title">👍 {safe_html(post.get('title', 'Untitled'))}</div>
+                <div class="post-content">{safe_html(post.get('text') or post.get('summary', ''))}</div>
                 <div class="post-meta">
-                    📍 r/{post['subreddit']} • 👤 u/{post['author']} • ⬆️ {post['score']} upvotes • 
+                    📍 r/{safe_html(post.get('subreddit', 'unknown'))} • 👤 u/{safe_html(post.get('author', 'deleted'))} • ⬆️ {safe_html(post.get('score', 0))} upvotes •
                     🎯 Relevancy: {post.get('relevancy_score', 0):.2f} • 
-                    💭 {post.get('num_comments', 0)} comments<br>
+                    💭 {safe_html(post.get('num_comments', 0))} comments<br>
                     {f"🧠 Sentiment: {post.get('sentiment_score', 0):.2f}" if post.get('sentiment_score') else ''}
                     <br>
-                    <a href="{reddit_url}" target="_blank" class="reddit-link">
+                    <a href="{reddit_url}" target="_blank" rel="noopener noreferrer" class="reddit-link">
                         🔗 View Full Reddit Thread & All Comments
                     </a>
                 </div>
@@ -848,10 +790,10 @@ def display_reddit_insights(sentiment_data: Dict[str, List[Dict]], location: str
                     st.markdown(f"""
                     <div class="comment-card">
                         <div class="comment-meta">
-                            <strong>u/{comment['author']}</strong> • ⬆️ {comment['score']} upvotes
+                            <strong>u/{safe_html(comment.get('author', 'deleted'))}</strong> • ⬆️ {safe_html(comment.get('score', 0))} upvotes
                         </div>
                         <div class="comment-text">
-                            {comment['body']}
+                            {safe_html(comment.get('body', ''))}
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
@@ -863,19 +805,19 @@ def display_reddit_insights(sentiment_data: Dict[str, List[Dict]], location: str
         st.markdown('<div class="section-header">⚠️ Things to Consider</div>', unsafe_allow_html=True)
 
         for i, post in enumerate(sentiment_data['negative'], 1):
-            reddit_url = post.get('url', '#')
+            reddit_url = safe_url(post.get('url'))
 
             st.markdown(f"""
             <div class="reddit-post-card negative-post">
-                <div class="post-title">⚠️ {post['title']}</div>
-                <div class="post-content">{post.get('text', post.get('summary', ''))}</div>
+                <div class="post-title">⚠️ {safe_html(post.get('title', 'Untitled'))}</div>
+                <div class="post-content">{safe_html(post.get('text') or post.get('summary', ''))}</div>
                 <div class="post-meta">
-                    📍 r/{post['subreddit']} • 👤 u/{post['author']} • ⬆️ {post['score']} upvotes • 
+                    📍 r/{safe_html(post.get('subreddit', 'unknown'))} • 👤 u/{safe_html(post.get('author', 'deleted'))} • ⬆️ {safe_html(post.get('score', 0))} upvotes •
                     🎯 Relevancy: {post.get('relevancy_score', 0):.2f} • 
-                    💭 {post.get('num_comments', 0)} comments<br>
+                    💭 {safe_html(post.get('num_comments', 0))} comments<br>
                     {f"🧠 Sentiment: {post.get('sentiment_score', 0):.2f}" if post.get('sentiment_score') else ''}
                     <br>
-                    <a href="{reddit_url}" target="_blank" class="reddit-link negative-reddit-link">
+                    <a href="{reddit_url}" target="_blank" rel="noopener noreferrer" class="reddit-link negative-reddit-link">
                         🔗 View Full Reddit Thread & All Comments
                     </a>
                 </div>
@@ -889,10 +831,10 @@ def display_reddit_insights(sentiment_data: Dict[str, List[Dict]], location: str
                     st.markdown(f"""
                     <div class="comment-card">
                         <div class="comment-meta">
-                            <strong>u/{comment['author']}</strong> • ⬆️ {comment['score']} upvotes
+                            <strong>u/{safe_html(comment.get('author', 'deleted'))}</strong> • ⬆️ {safe_html(comment.get('score', 0))} upvotes
                         </div>
                         <div class="comment-text">
-                            {comment['body']}
+                            {safe_html(comment.get('body', ''))}
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
@@ -901,8 +843,11 @@ def display_costs(location: str):
     """Display comprehensive cost estimates."""
     st.markdown('<div class="section-header">💰 Estimated Costs</div>', unsafe_allow_html=True)
 
-    default_costs = {"daily": 200, "accommodation": 100, "food": 50, "transport": 20, "attractions": 30}
-    costs = COST_DATA.get(location, default_costs)
+    costs = COST_DATA.get(location)
+    if costs is None:
+        st.info(f'No budget estimate is available for {location} yet.')
+        return
+    st.caption('Illustrative estimates in USD; actual prices vary by date and travel style.')
 
     trip_3_days = costs['daily'] * 3
     trip_1_week = costs['daily'] * 7
@@ -954,28 +899,39 @@ def display_costs(location: str):
             </div>
             """, unsafe_allow_html=True)
 
-def load_extraction_summary():
+@st.cache_data(ttl=300)
+def load_extraction_summary(demo_mode: bool = False):
     """Load extraction summary for analytics."""
-    try:
-        # Try S3 first
-        s3_client = get_s3_client()
-        if s3_client:
-            bucket_name = get_environment_value("S3_BUCKET_NAME")
-            if bucket_name:
-                try:
-                    response = s3_client.get_object(Bucket=bucket_name, Key='extraction_summary.json')
-                    return json.loads(response['Body'].read().decode('utf-8'))
-                except:
-                    pass
+    s3_client = None if demo_mode else get_s3_client()
+    if s3_client:
+        bucket_name = get_environment_value('S3_BUCKET_NAME')
+        if bucket_name:
+            try:
+                response = s3_client.get_object(Bucket=bucket_name, Key='extraction_summary.json')
+                return validate_extraction_summary(json.loads(response['Body'].read().decode('utf-8')))
+            except ClientError as error:
+                if error.response['Error']['Code'] != 'NoSuchKey':
+                    st.warning('Could not load the S3 extraction summary')
+            except Exception as error:
+                st.warning(f'Could not read the S3 extraction summary: {error}')
 
-        # Try local file
-        if os.path.exists('data/summaries/extraction_summary.json'):
-            with open('data/summaries/extraction_summary.json', 'r') as f:
-                return json.load(f)
-    except:
-        pass
+    root = get_data_directory() / 'demo' if demo_mode else get_data_directory()
+    summary_path = root / 'summaries' / 'extraction_summary.json'
+    try:
+        if summary_path.is_file():
+            with summary_path.open(encoding='utf-8') as f:
+                return validate_extraction_summary(json.load(f), include_demo=demo_mode)
+    except (OSError, ValueError) as error:
+        st.warning(f'Could not read the local extraction summary: {error}')
 
     return None
+
+
+def request_reddit_refresh():
+    """Widget callback runs before the next script, so mode changes are safe."""
+    st.session_state['reddit_data_source'] = 'Extract Fresh Data'
+    st.session_state['refresh_reddit'] = True
+
 
 def main():
     """Main application function."""
@@ -1021,40 +977,39 @@ def main():
         show_costs = st.checkbox("💰 Show Cost Estimates", value=True)
 
         st.subheader("Data Options")
+        demo_mode = st.checkbox('Use demo data', value=False, key='demo_mode')
 
-        # Reddit data options
-        if api_status['reddit']:
-            data_source_option = st.radio(
-                "Reddit Data Source:",
-                ["Use Stored Data", "Extract Fresh Data"],
-                help="Stored data is faster, Fresh data is more current"
-            )
-            use_fresh_reddit = (data_source_option == "Extract Fresh Data")
-
-            if use_fresh_reddit:
-                max_posts = st.slider("Max posts to extract:", 10, 50, 20)
-        else:
-            use_fresh_reddit = False
-            max_posts = 20
+        data_source_option = st.radio(
+            'Reddit Data Source:', ['Use Stored Data', 'Extract Fresh Data'],
+            key='reddit_data_source', disabled=not api_status['reddit'] or demo_mode,
+            help='Stored posts work without a Reddit connection. Fresh collection runs only when requested.',
+        )
+        use_fresh_reddit = data_source_option == 'Extract Fresh Data' and api_status['reddit'] and not demo_mode
+        max_posts = st.slider('Max posts to extract:', 10, 50, 20) if use_fresh_reddit else 20
+        st.button(
+            '🔄 Extract Fresh Reddit Data', key='fetch_reddit', on_click=request_reddit_refresh,
+            disabled=not api_status['reddit'] or demo_mode or not show_reddit,
+        )
+        fresh_request = st.session_state.pop('refresh_reddit', False)
 
         # API status indicators
         st.subheader("📊 Data Sources")
 
         # Google Places status
         if api_status['google']:
-            st.markdown('<span class="status-indicator status-connected">✅ Google Places API</span>', unsafe_allow_html=True)
+            st.markdown('<span class="status-indicator status-connected">Google Places configured</span>', unsafe_allow_html=True)
         else:
             st.markdown('<span class="status-indicator status-missing">⚠️ Google Places API Missing</span>', unsafe_allow_html=True)
 
         # Reddit status
         if api_status['reddit']:
-            st.markdown('<span class="status-indicator status-connected">✅ Reddit API</span>', unsafe_allow_html=True)
+            st.markdown('<span class="status-indicator status-connected">Reddit configured</span>', unsafe_allow_html=True)
         else:
             st.markdown('<span class="status-indicator status-missing">⚠️ Reddit API Missing</span>', unsafe_allow_html=True)
 
         # AWS status
         if api_status['aws']:
-            st.markdown('<span class="status-indicator status-connected">✅ AWS S3</span>', unsafe_allow_html=True)
+            st.markdown('<span class="status-indicator status-connected">S3 configured</span>', unsafe_allow_html=True)
         else:
             st.markdown('<span class="status-indicator status-missing">📝 Local Storage Only</span>', unsafe_allow_html=True)
 
@@ -1062,7 +1017,7 @@ def main():
         st.subheader(f"📈 {selected_location} Data")
 
         # Load and display summary statistics
-        summary = load_extraction_summary()
+        summary = load_extraction_summary(demo_mode)
         if summary and selected_location in summary.get('by_location', {}):
             location_stats = summary['by_location'][selected_location]
             st.metric("Travel Posts", location_stats.get('travel', 0))
@@ -1070,21 +1025,23 @@ def main():
             st.metric("Events Posts", location_stats.get('events', 0))
             st.metric("Total Posts", sum(location_stats.values()))
         else:
-            st.metric("Available Data", "Ready")
+            st.metric("Available Data", "No summary")
             if api_status['reddit']:
                 st.caption("Extract fresh data to see statistics")
 
     # Main content area
     if selected_location:
+        if demo_mode:
+            st.warning('Demo mode: community posts are fictional samples, not real traveler reports.')
 
         # Load all data with progress indicators
         with st.spinner(f"Loading comprehensive data for {selected_location}..."):
 
             # Get Google Places data
             places_data = None
-            if api_status['google']:
+            if api_status['google'] and (show_restaurants or show_attractions):
                 places_data = get_google_places_data(selected_location)
-                data_source_places = "Live Google Places API"
+                data_source_places = "Google Places"
             else:
                 data_source_places = "API Key Required"
 
@@ -1092,14 +1049,17 @@ def main():
             reddit_posts = []
             data_source_reddit = "No Data"
 
-            if show_reddit and api_status['reddit']:
+            if show_reddit:
                 if use_fresh_reddit:
-                    st.info("🔄 Extracting fresh Reddit data... This will take 1-2 minutes.")
-                    reddit_posts = extract_fresh_reddit_data(selected_location, max_posts)
-                    data_source_reddit = f"Fresh Reddit API ({len(reddit_posts)} posts)"
+                    snapshots = st.session_state.setdefault('fresh_reddit_posts', {})
+                    snapshot_key = (selected_location, max_posts)
+                    if fresh_request:
+                        snapshots[snapshot_key] = extract_fresh_reddit_data(selected_location, max_posts)
+                    reddit_posts = snapshots.get(snapshot_key, [])
+                    data_source_reddit = f"Fresh Reddit snapshot ({len(reddit_posts)} posts)"
                 else:
-                    reddit_posts = load_reddit_data_from_s3(selected_location)
-                    data_source_reddit = f"Stored Reddit Data ({len(reddit_posts)} posts)" if reddit_posts else "No Stored Data"
+                    reddit_posts = load_stored_reddit_data(selected_location, str(get_data_directory()), demo_mode)
+                    data_source_reddit = f"{'Demo' if demo_mode else 'Stored Reddit'} Data ({len(reddit_posts)} posts)"
 
                 # Analyze sentiment if we have posts
                 if reddit_posts:
@@ -1113,45 +1073,40 @@ def main():
         if show_restaurants:
             if places_data and places_data['restaurants']:
                 display_restaurants(places_data['restaurants'], selected_location, data_source_places)
+            elif not api_status['google']:
+                st.info('Restaurant recommendations are unavailable until Google Places is configured.')
             else:
-                st.warning("🔑 Google Places API key required to show real restaurant data")
-                st.info("Add your Google Places API key in the Streamlit Cloud app settings to see verified restaurants with ratings, addresses, and contact information.")
+                st.info('No restaurant recommendations are available for this destination right now.')
 
         if show_attractions:
             if places_data and places_data['attractions']:
                 display_attractions(places_data['attractions'], selected_location, data_source_places)
+            elif not api_status['google']:
+                st.info('Attraction recommendations are unavailable until Google Places is configured.')
             else:
-                st.warning("🔑 Google Places API key required to show real attraction data")
-                st.info("Add your Google Places API key in the Streamlit Cloud app settings to see verified attractions with ratings and details.")
+                st.info('No attraction recommendations are available for this destination right now.')
 
         if show_costs:
             display_costs(selected_location)
 
         if show_reddit:
-            if api_status['reddit']:
-                if reddit_posts:
-                    display_reddit_insights(sentiment_analysis, selected_location, data_source_reddit)
-                else:
-                    st.warning("No Reddit data found for this location. Try extracting fresh data.")
-                    if st.button("🔄 Extract Fresh Reddit Data"):
-                        st.rerun()
+            if reddit_posts:
+                display_reddit_insights(sentiment_analysis, selected_location, data_source_reddit)
+                if sentiment_analysis.get('neutral'):
+                    with st.expander('Community discussions with neutral or mixed sentiment'):
+                        for post in sentiment_analysis['neutral']:
+                            st.write(post.get('title', 'Untitled'))
+                            st.write(post.get('text') or post.get('summary', ''))
             else:
-                st.warning("🔑 Reddit API credentials required to show community insights")
-                with st.expander("📖 How to get Reddit API credentials"):
-                    st.info("""
-                    **To get Reddit API credentials:**
-                    1. Go to [reddit.com/prefs/apps](https://reddit.com/prefs/apps)
-                    2. Click "Create App" or "Create Another App"
-                    3. Choose "script" as the app type
-                    4. Copy your Client ID and Client Secret
-                    5. Add them to your Streamlit Cloud app settings
-                    """)
+                st.info('No community posts are available for this destination in the selected data source.')
+                if api_status['reddit'] and not demo_mode:
+                    st.button('Collect posts for this destination', key='collect_empty_reddit', on_click=request_reddit_refresh)
 
     # Analytics dashboard
     st.markdown('<h2 style="color: #ffffff; margin-top: 3rem;">📊 Global Community Insights</h2>', unsafe_allow_html=True)
 
     # Load summary for global stats
-    summary = load_extraction_summary()
+    summary = load_extraction_summary(demo_mode)
 
     col1, col2, col3, col4 = st.columns(4)
 
@@ -1196,16 +1151,16 @@ def main():
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        google_status = "✅ Live Data" if api_status['google'] else "🔑 API Key Needed"
+        google_status = "Configured" if api_status['google'] else "Not configured"
         st.info(f"**Restaurants & Attractions**\n{google_status}")
         if api_status['google']:
             st.caption("Showing verified Google Places data")
 
     with col2:
-        reddit_status = "✅ Live Data" if api_status['reddit'] else "🔑 API Key Needed"
+        reddit_status = 'Demo data' if demo_mode else 'Stored data available without Reddit credentials'
         st.info(f"**Community Insights**\n{reddit_status}")
         if api_status['reddit']:
-            st.caption("Real Reddit posts with sentiment analysis")
+            st.caption("Fresh collection is available on request")
 
     with col3:
         aws_status = "✅ Cloud Storage" if api_status['aws'] else "💾 Local Storage"
