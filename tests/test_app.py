@@ -9,6 +9,9 @@ import praw
 import pytest
 from botocore.exceptions import ClientError
 from streamlit.testing.v1 import AppTest
+from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
+from packaging.utils import canonicalize_name
 
 from src.utils.helpers import PROJECT_ROOT
 
@@ -38,6 +41,23 @@ def test_streamlit_config_keeps_cross_origin_and_xsrf_protection_enabled():
     config = tomllib.loads((PROJECT_ROOT / '.streamlit' / 'config.toml').read_text())
     assert config['server']['enableCORS'] is True
     assert config['server']['enableXsrfProtection'] is True
+
+
+def test_lockfile_tracks_dynamic_requirements_and_build_cache_inputs():
+    pyproject = tomllib.loads((PROJECT_ROOT / 'pyproject.toml').read_text())
+    assert {'file': 'requirements.txt'} in pyproject['tool']['uv']['cache-keys']
+    requirements = [
+        Requirement(line) for line in (PROJECT_ROOT / 'requirements.txt').read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith('#')
+    ]
+    expected = {canonicalize_name(requirement.name): requirement.specifier for requirement in requirements}
+    lockfile = tomllib.loads((PROJECT_ROOT / 'uv.lock').read_text())
+    package = next(package for package in lockfile['package'] if package['name'] == 'nomadai')
+    actual = {
+        canonicalize_name(dependency['name']): SpecifierSet(dependency.get('specifier', ''))
+        for dependency in package['metadata']['requires-dist'] if 'marker' not in dependency
+    }
+    assert actual == expected
 
 
 def test_local_community_data_is_visible_without_reddit_credentials(sample_posts, tmp_path):

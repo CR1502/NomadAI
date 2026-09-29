@@ -10,6 +10,13 @@ from ..data_pipeline.storage import is_demo_post, location_slug
 from ..models.embedding_model import EmbeddingModel
 from ..models.trip_preferences import INTERESTS, PACE_LIMITS, TripPreferences
 from ..services.trip_planning import TripPlanningService
+from ..services.ollama import DEFAULT_BASE_URL, DEFAULT_MODEL
+from ..services.place_policy import (
+    attribution_html,
+    google_maps_link,
+    hydrate_itinerary,
+    persistable_itinerary,
+)
 from ..utils.content import calculate_costs, safe_url
 from ..utils.helpers import load_config
 
@@ -21,6 +28,15 @@ def get_semantic_encoder():
 
 
 def request_fingerprint(location: str, preferences: dict, posts: list, places: dict | None, **options) -> str:
+    # Fetch timestamps change on every live request, not the underlying places.
+    if places:
+        places = {
+            key: [
+                {field: value for field, value in place.items() if field != "fetched_at"}
+                for place in places.get(key, [])
+            ]
+            for key in ("restaurants", "attractions")
+        }
     payload = json.dumps([location, preferences, posts, places, options], sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()
 
@@ -33,10 +49,23 @@ def render_trip_planner(
     demo_mode: bool,
     api_key: str = "",
     model_name: str | None = None,
+    provider: str = "ollama",
+    ollama_model: str = DEFAULT_MODEL,
+    ollama_base_url: str = DEFAULT_BASE_URL,
 ):
     st.subheader("Plan your trip")
     st.caption("Generate a preference-based draft from available places and ranked community discussions.")
-    ai_available = bool(api_key and find_spec("openai")) and not demo_mode
+    # Outside the form so backend availability updates immediately, without generation.
+    provider = st.selectbox(
+        "AI backend",
+        ["ollama", "openai"],
+        index=1 if provider == "openai" else 0,
+        format_func=lambda value: "Local model (Ollama)" if value == "ollama" else "OpenAI (cloud)",
+        key="trip_ai_provider",
+        disabled=demo_mode,
+    )
+    selected_model = ollama_model if provider == "ollama" else model_name
+    ai_available = not demo_mode and (provider == "ollama" or bool(api_key and find_spec("openai")))
     semantic_available = find_spec("sentence_transformers") is not None
     components = load_config().get("costs", {}).get(location)
     initial_budget = float(calculate_costs(components)["daily"]) if components else 0.0
@@ -73,12 +102,23 @@ def render_trip_planner(
                 "Budget is a target, not verified spending. Unknown venue prices remain explicitly unverified."
             )
         use_ai = st.checkbox(
-            "Use OpenAI for this draft", value=False, key="trip_use_ai", disabled=not ai_available
+            "Use AI for this draft", value=False, key="trip_use_ai", disabled=not ai_available
         )
         st.caption(
-            "AI generation sends these preferences, place data, and selected discussions to OpenAI and may incur charges."
-            if ai_available
-            else "Local planning is available without OpenAI. AI requires the ai extra and a configured key; it is disabled in demo mode."
+            "AI is disabled in demo mode. The no-AI planner remains available."
+            if demo_mode
+            else (
+                f"Local model: {ollama_model}. Requires a running local Ollama server and an installed model; no OpenAI key is needed."
+                if provider == "ollama"
+                else (
+                    "Preferences and selected community evidence are sent to OpenAI; API charges may apply."
+                    if ai_available
+                    else "OpenAI requires the ai extra and a configured key. The no-AI planner remains available."
+                )
+            )
+        )
+        st.caption(
+            "Google Maps details are not sent to either model; candidates use opaque labels. No cloud fallback runs automatically."
         )
         semantic = st.checkbox(
             "Use semantic retrieval", value=False, key="trip_semantic", disabled=not semantic_available
@@ -98,10 +138,25 @@ def render_trip_planner(
     use_ai = bool(use_ai and ai_available)
     semantic = bool(semantic and semantic_available)
     fingerprint = request_fingerprint(
-        location, preferences, posts, places, demo=demo_mode, ai=use_ai, semantic=semantic, model=model_name
+        location,
+        preferences,
+        posts,
+        places,
+        demo=demo_mode,
+        ai=use_ai,
+        semantic=semantic,
+        model=selected_model,
+        provider=provider,
+        local_endpoint=ollama_base_url if provider == "ollama" else None,
     )
     drafts = st.session_state.setdefault("trip_drafts", {})
+    # A hot reload from Phase 2 may leave drafts without provider provenance.
+    # Drop those unversioned in-memory drafts before rendering or exporting them.
+    for key in list(drafts):
+        if drafts[key].get("policy_version") != 1:
+            del drafts[key]
     draft_key = (location, demo_mode)
+    result = None
     if submitted:
         with st.spinner("Retrieving evidence and building your draft..."):
             embedding_model = None
@@ -111,7 +166,11 @@ def render_trip_planner(
                 except Exception:
                     st.warning("Semantic retrieval is unavailable; using local TF-IDF search instead.")
             service = TripPlanningService(
-                api_key=api_key, model_name=model_name, embedding_model=embedding_model
+                api_key=api_key,
+                model_name=selected_model,
+                embedding_model=embedding_model,
+                provider=provider,
+                ollama_base_url=ollama_base_url,
             )
             try:
                 result = service.generate(
@@ -120,7 +179,11 @@ def render_trip_planner(
             except (ValueError, OSError) as error:
                 st.error(f"Could not build the itinerary: {error}")
                 return
-            drafts[draft_key] = {"fingerprint": fingerprint, "result": result}
+            drafts[draft_key] = {
+                "fingerprint": fingerprint,
+                "result": persistable_itinerary(result),
+                "policy_version": 1,
+            }
     stored = drafts.get(draft_key)
     if stored is None:
         st.info(
@@ -131,11 +194,11 @@ def render_trip_planner(
         st.warning(
             "Preferences or source data changed. This is your previous draft; generate again to update it."
         )
-    result = stored["result"]
+    result = result if result is not None else hydrate_itinerary(stored["result"], places)
     plan_preferences = result["user_preferences"]
     st.subheader(f"{location} — {plan_preferences['duration']}-day draft")
     st.caption(
-        f"{'AI-assisted' if result['ai_generated'] else 'Local preference-based'} planning · "
+        f"{('AI-assisted (' + result.get('ai_model', 'configured model') + ')') if result['ai_generated'] else 'No-AI preference-based'} planning · "
         f"{plan_preferences['pace'].title()} pace · {result['retrieval_method']} retrieval"
     )
     if result["demo_mode"]:
@@ -151,9 +214,21 @@ def render_trip_planner(
                     "No additional unique places are available. Load place data or adjust your price-tier limit."
                 )
             for activity in day["activities"]:
-                st.text(f"{activity['time']} · {activity['activity']}")
+                if activity.get("source") == "google_places":
+                    with st.container(border=True):
+                        st.text(f"{activity['time']} · {activity['activity']}")
+                        st.caption("Current place details from Google Maps; not stored in the draft.")
+                        if activity.get("address"):
+                            st.text(activity["address"])
+                        st.caption(f"Venue price tier: {activity.get('price', 'Price unavailable')}")
+                        st.markdown(attribution_html(activity), unsafe_allow_html=True)
+                        maps_link = google_maps_link(activity)
+                        if maps_link:
+                            st.link_button("View place on Google Maps", maps_link)
+                else:
+                    st.text(f"{activity['time']} · {activity['activity']}")
+                    st.caption(f"Venue price tier: {activity.get('price', 'Price unavailable')}")
                 st.text(activity["description"])
-                st.caption(f"Venue price tier: {activity.get('price', 'Price unavailable')}")
                 for reason in activity.get("match_reasons", []):
                     st.caption(reason)
                 for warning in activity.get("warnings", []):
@@ -177,10 +252,13 @@ def render_trip_planner(
                 st.caption("Fictional demo discussion; not used as itinerary evidence.")
             elif safe_url(post.get("url")) != "#":
                 st.link_button("Read community discussion", post["url"])
+    if stored["result"].get("export_notice"):
+        st.caption(stored["result"]["export_notice"])
     st.download_button(
         "Download itinerary JSON",
-        json.dumps(result, indent=2, ensure_ascii=False),
+        json.dumps(stored["result"], indent=2, ensure_ascii=False),
         file_name=f"nomadai_{location_slug(location)}_itinerary.json",
         mime="application/json",
         key="trip_download",
+        on_click="ignore",
     )

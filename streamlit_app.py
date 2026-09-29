@@ -15,9 +15,12 @@ from math import log1p
 from typing import Dict, List
 
 from src.data_pipeline.storage import deduplicate_posts, load_location_posts, location_slug, validate_extraction_summary
-from src.utils.content import calculate_costs, classify_sentiment, normalize_place, safe_html, safe_url
+from src.utils.content import calculate_costs, classify_sentiment, safe_html, safe_url
 from src.utils.helpers import PROJECT_ROOT, load_config
 from src.services.demo_data import demo_places
+from src.services.places import PlacesClient, PlacesError
+from src.services.ollama import DEFAULT_BASE_URL, DEFAULT_MODEL
+from src.services.place_policy import attribution_html, google_maps_link
 from src.web.trip_planner import render_trip_planner
 
 # Import optional dependencies with error handling
@@ -27,12 +30,6 @@ try:
     HAS_AWS = True
 except ImportError:
     HAS_AWS = False
-
-try:
-    import googlemaps
-    HAS_GOOGLE_MAPS = True
-except ImportError:
-    HAS_GOOGLE_MAPS = False
 
 try:
     import praw
@@ -355,7 +352,7 @@ def check_api_connections():
 
     # Check Google Places API
     google_key = get_environment_value("GOOGLE_PLACES_API_KEY")
-    api_status['google'] = bool(google_key and HAS_GOOGLE_MAPS)
+    api_status['google'] = bool(google_key)
 
     # Check AWS S3
     api_status['aws'] = bool(get_environment_value('S3_BUCKET_NAME') and HAS_AWS)
@@ -414,94 +411,29 @@ def get_reddit_client():
         return None
 
 @st.cache_resource
-def get_google_places_client():
-    """Initialize Google Places client."""
-    if not HAS_GOOGLE_MAPS:
-        return None
-
-    api_key = get_environment_value("GOOGLE_PLACES_API_KEY")
-
+def get_google_places_client(api_key: str, detail_level: str):
+    """Cache the transport only, never Google Maps response content."""
     if not api_key:
         return None
 
     try:
-        return googlemaps.Client(key=api_key)
-    except Exception as e:
-        st.error(f"Google Places client initialization failed: {e}")
+        return PlacesClient(api_key, detail_level=detail_level)
+    except (PlacesError, ValueError) as error:
+        st.error(str(error))
         return None
 
-@st.cache_data(ttl=300)
-def get_google_places_data(location: str):
-    """Get real Google Places data."""
-    gmaps = get_google_places_client()
-
-    if not gmaps:
+def get_google_places_data(location: str, restaurants: bool = True, attractions: bool = True):
+    """Fresh, bounded searches; no application cache of Google Maps content."""
+    client = get_google_places_client(
+        get_environment_value('GOOGLE_PLACES_API_KEY'),
+        get_environment_value('GOOGLE_PLACES_DETAIL_LEVEL') or 'standard',
+    )
+    if not client:
         return None
-
-    try:
-        # Geocode the location
-        geocode = gmaps.geocode(location)
-
-        if not geocode:
-            st.warning(f"Could not find coordinates for {location}")
-            return None
-
-        lat_lng = geocode[0]['geometry']['location']
-
-        # Get restaurants
-        restaurants_result = gmaps.places_nearby(
-            location=lat_lng,
-            radius=8000,
-            type='restaurant',
-            language='en'
-        )
-
-        # Get attractions
-        attractions_result = gmaps.places_nearby(
-            location=lat_lng,
-            radius=8000,
-            type='tourist_attraction',
-            language='en'
-        )
-
-        # Process restaurants with detailed information
-        restaurants = []
-        for place in restaurants_result.get('results', [])[:10]:
-            try:
-                details = gmaps.place(
-                    place_id=place['place_id'],
-                    fields=['name', 'rating', 'user_ratings_total', 'price_level',
-                           'formatted_address', 'website', 'formatted_phone_number']
-                )
-
-                detail_info = details.get('result', {})
-                restaurants.append(normalize_place(place, detail_info))
-            except Exception as error:
-                st.warning(f"Could not load restaurant details for {place.get('name', 'a place')}: {error}")
-                restaurants.append(normalize_place(place))
-
-        # Process attractions with detailed information
-        attractions = []
-        for place in attractions_result.get('results', [])[:10]:
-            try:
-                details = gmaps.place(
-                    place_id=place['place_id'],
-                    fields=['name', 'rating', 'user_ratings_total', 'formatted_address',
-                           'website', 'formatted_phone_number']
-                )
-
-                detail_info = details.get('result', {})
-
-                attractions.append(normalize_place(place, detail_info))
-            except Exception as error:
-                st.warning(f"Could not load attraction details for {place.get('name', 'a place')}: {error}")
-                attractions.append(normalize_place(place))
-
-        return {'restaurants': restaurants, 'attractions': attractions}
-
-    except Exception as e:
-        st.error(f"Google Places API error: {e}")
-        return None
+    result = client.search_destination(location, restaurants=restaurants, attractions=attractions)
+    for warning in result['warnings']:
+        st.warning(warning)
+    return result
 
 @st.cache_data(ttl=300)
 def load_reddit_data_from_s3(location: str):
@@ -721,8 +653,12 @@ def display_restaurants(restaurants: List[Dict], location: str, data_source: str
                 <strong>📞 Phone:</strong> {phone}<br>
                 <strong>🌐 Website:</strong> {website_display}
             </div>
+            {attribution_html(restaurant)}
         </div>
         """, unsafe_allow_html=True)
+        maps_link = google_maps_link(restaurant)
+        if maps_link:
+            st.link_button('View restaurant on Google Maps', maps_link)
 
 def display_attractions(attractions: List[Dict], location: str, data_source: str = "Google Places"):
     """Display attraction recommendations with enhanced details."""
@@ -755,8 +691,12 @@ def display_attractions(attractions: List[Dict], location: str, data_source: str
                 <strong>📞 Phone:</strong> {phone}<br>
                 <strong>🌐 Website:</strong> {website_display}
             </div>
+            {attribution_html(attraction)}
         </div>
         """, unsafe_allow_html=True)
+        maps_link = google_maps_link(attraction)
+        if maps_link:
+            st.link_button('View attraction on Google Maps', maps_link)
 
 def display_reddit_insights(sentiment_data: Dict[str, List[Dict]], location: str, data_source: str = "Reddit API"):
     """Display comprehensive Reddit community insights."""
@@ -952,10 +892,9 @@ def main():
     api_status = check_api_connections()
 
     # Show dependency status
-    if not all([HAS_AWS, HAS_GOOGLE_MAPS, HAS_REDDIT, HAS_TEXTBLOB]):
+    if not all([HAS_AWS, HAS_REDDIT, HAS_TEXTBLOB]):
         missing_deps = []
         if not HAS_AWS: missing_deps.append("boto3")
-        if not HAS_GOOGLE_MAPS: missing_deps.append("googlemaps")
         if not HAS_REDDIT: missing_deps.append("praw")
         if not HAS_TEXTBLOB: missing_deps.append("textblob")
 
@@ -1046,8 +985,11 @@ def main():
                 places_data = demo_places(selected_location)
                 data_source_places = 'Fictional demo places'
             elif api_status['google'] and (show_restaurants or show_attractions or show_planner):
-                places_data = get_google_places_data(selected_location)
-                data_source_places = "Google Places"
+                places_data = get_google_places_data(
+                    selected_location, restaurants=show_restaurants or show_planner,
+                    attractions=show_attractions or show_planner,
+                )
+                data_source_places = "Google Maps"
             else:
                 data_source_places = "API Key Required"
 
@@ -1100,6 +1042,9 @@ def main():
                 selected_location, reddit_posts, places_data, demo_mode=demo_mode,
                 api_key=get_environment_value('OPENAI_API_KEY'),
                 model_name=get_environment_value('OPENAI_MODEL') or 'gpt-4.1-mini',
+                provider=get_environment_value('NOMADAI_AI_PROVIDER') or 'ollama',
+                ollama_model=get_environment_value('OLLAMA_MODEL') or DEFAULT_MODEL,
+                ollama_base_url=get_environment_value('OLLAMA_BASE_URL') or DEFAULT_BASE_URL,
             )
 
         if show_reddit:
@@ -1164,10 +1109,20 @@ def main():
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        google_status = "Configured" if api_status['google'] else "Not configured"
+        google_status = "Fictional demo places" if demo_mode else ("Configured" if api_status['google'] else "Not configured")
         st.info(f"**Restaurants & Attractions**\n{google_status}")
-        if api_status['google']:
-            st.caption("Showing verified Google Places data")
+        if api_status['google'] and not demo_mode:
+            st.caption("Live place listings from Google Maps; verify hours and availability before visiting.")
+            st.caption('Fresh searches run on page reruns; provider billing depends on the selected field mask.')
+
+    if api_status['google'] and not demo_mode:
+        terms_url = get_environment_value('TERMS_OF_USE_URL')
+        privacy_url = get_environment_value('PRIVACY_POLICY_URL')
+        if safe_url(terms_url) != '#' and safe_url(privacy_url) != '#':
+            st.link_button('Terms of Use', terms_url)
+            st.link_button('Privacy Policy', privacy_url)
+        else:
+            st.warning('Before public deployment, publish compliant Terms of Use and Privacy Policy pages and configure TERMS_OF_USE_URL and PRIVACY_POLICY_URL.')
 
     with col2:
         reddit_status = 'Demo data' if demo_mode else 'Stored data available without Reddit credentials'

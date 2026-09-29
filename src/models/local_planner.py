@@ -42,6 +42,14 @@ def activity_details(place: dict) -> dict:
         "match_reasons": place["match_reasons"],
         "community_mentions": place["community_mentions"],
         "warnings": place["warnings"],
+        "source": place.get("source"),
+        "coordinates": place.get("coordinates"),
+        "regular_opening_hours": place.get("regular_opening_hours"),
+        "current_opening_hours": place.get("current_opening_hours"),
+        "time_zone": place.get("time_zone"),
+        "utc_offset_minutes": place.get("utc_offset_minutes"),
+        "google_maps_uri": place.get("google_maps_uri"),
+        "attributions": place.get("attributions", []),
     }
 
 

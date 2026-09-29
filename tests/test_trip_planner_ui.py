@@ -2,10 +2,11 @@ import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-import googlemaps
 from streamlit.testing.v1 import AppTest
 
 from src.services.trip_planning import TripPlanningService
+from src.services.places import PlacesClient
+from src.services.ollama import OllamaClient
 from src.utils.helpers import PROJECT_ROOT
 from src.web import trip_planner
 
@@ -132,6 +133,7 @@ def test_ai_is_opt_in_and_streamlit_secret_is_passed_to_the_service(monkeypatch)
     assert not calls
     assert not app.checkbox(key="trip_use_ai").disabled
     assert app.checkbox(key="trip_use_ai").value is False
+    app.selectbox(key="trip_ai_provider").select("openai")
     app.checkbox(key="trip_use_ai").check()
     submit(app)
     assert calls[0]["kwargs"]["use_ai"] is True
@@ -169,15 +171,153 @@ def test_fresh_source_data_marks_the_existing_draft_stale(sample_posts, tmp_path
 
 def test_untrusted_place_names_are_rendered_as_text_not_raw_html(monkeypatch):
     malicious_name = "<script>alert(1)</script> Museum"
-    google = SimpleNamespace(
-        geocode=lambda *args: [{"geometry": {"location": {"lat": 0, "lng": 0}}}],
-        places_nearby=lambda **kwargs: {"results": [{"name": malicious_name, "place_id": kwargs["type"]}]},
-        place=lambda **kwargs: {"result": {"name": malicious_name}},
+    monkeypatch.setattr(
+        PlacesClient,
+        "search_destination",
+        lambda *args, **kwargs: {
+            "restaurants": [],
+            "attractions": [
+                {
+                    "name": malicious_name,
+                    "place_id": "museum",
+                    "source": "google_places",
+                }
+            ],
+            "warnings": [],
+        },
     )
-    monkeypatch.setattr(googlemaps, "Client", lambda **kwargs: google)
     app = AppTest.from_file(str(PROJECT_ROOT / "streamlit_app.py"), default_timeout=20)
     app.secrets["GOOGLE_PLACES_API_KEY"] = "test"
     app.run()
     submit(app)
     assert any(malicious_name in item.value for item in app.text)
     assert not any("<script>" in item.value for item in app.markdown)
+    assert malicious_name not in json.dumps(current_draft(app))
+
+
+def live_places():
+    return {
+        "restaurants": [],
+        "attractions": [
+            {
+                "name": "Provider Museum",
+                "place_id": "provider-museum",
+                "source": "google_places",
+                "address": "Provider-only Address",
+                "price_level": 1,
+                "rating": None,
+                "types": ["museum"],
+                "attributions": [{"provider": "Third Party", "provider_uri": "https://example.org"}],
+            }
+        ],
+        "warnings": [],
+    }
+
+
+def test_ollama_is_default_opt_in_and_results_are_redacted_in_session(monkeypatch):
+    places = Mock(side_effect=lambda *args, **kwargs: live_places())
+    monkeypatch.setattr(PlacesClient, "search_destination", places)
+    draft = {
+        "days": [
+            {
+                "day": 1,
+                "title": "Day 1",
+                "activities": [
+                    {
+                        "time": "9:30 AM",
+                        "activity": "Candidate 1",
+                        "description": "Suggested visit.",
+                        "type": "attraction",
+                        "source_urls": [],
+                    }
+                ],
+            }
+        ],
+        "reddit_tips": [],
+        "budget_notes": [],
+    }
+    generate = Mock(return_value=json.dumps(draft))
+    monkeypatch.setattr(OllamaClient, "generate", generate)
+    app = AppTest.from_file(str(PROJECT_ROOT / "streamlit_app.py"), default_timeout=20)
+    app.secrets["GOOGLE_PLACES_API_KEY"] = "fixture-key"
+    app.run()
+    assert app.selectbox(key="trip_ai_provider").value == "ollama"
+    assert app.checkbox(key="trip_use_ai").value is False
+    generate.assert_not_called()
+    app.slider(key="trip_duration").set_value(1)
+    app.checkbox(key="trip_use_ai").check()
+    submit(app)
+    assert generate.call_count == 1
+    assert generate.call_args.kwargs["model"] == "gemma4:12b"
+    assert "Provider-only Address" not in generate.call_args.kwargs["prompt"]
+    assert "Provider Museum" not in generate.call_args.kwargs["prompt"]
+    saved = current_draft(app)
+    assert saved["ai_generated"] is True and saved["ai_provider"] == "ollama"
+    assert "Provider Museum" not in json.dumps(saved) and "Provider-only Address" not in json.dumps(saved)
+    assert any("Provider Museum" in item.value for item in app.text)
+    app.checkbox(key="show_costs").uncheck().run()
+    assert not app.exception and generate.call_count == 1
+    assert places.call_count == 3  # fresh page response, generation submit, unrelated rerun
+    assert any("Provider Museum" in item.value for item in app.text)
+    assert current_draft(app) == saved
+    assert app.get("download_button")[0].proto.ignore_rerun is True
+
+
+def test_backend_switch_updates_availability_without_running_generation(monkeypatch):
+    generate = Mock(side_effect=AssertionError("No automatic inference"))
+    monkeypatch.setattr(OllamaClient, "generate", generate)
+    app = run_app()
+    assert not app.checkbox(key="trip_use_ai").disabled
+    app.selectbox(key="trip_ai_provider").select("openai").run()
+    assert app.checkbox(key="trip_use_ai").disabled
+    app.selectbox(key="trip_ai_provider").select("ollama").run()
+    assert not app.checkbox(key="trip_use_ai").disabled
+    generate.assert_not_called()
+
+
+def test_old_unversioned_session_drafts_are_not_rendered_or_exported():
+    app = run_app()
+    app.session_state["trip_drafts"] = {
+        ("Paris", False): {
+            "fingerprint": "legacy",
+            "result": {"days": [{"activities": [{"activity": "Old Provider Content"}]}]},
+        },
+    }
+    app.run()
+    assert not app.exception
+    assert not app.session_state["trip_drafts"]
+    assert not app.get("download_button")
+
+
+def test_live_provider_errors_warn_without_crashing_the_app(monkeypatch):
+    monkeypatch.setattr(
+        PlacesClient,
+        "search_destination",
+        lambda *args, **kwargs: {
+            "restaurants": [],
+            "attractions": [],
+            "warnings": ["Restaurants: Google Places quota reached."],
+        },
+    )
+    app = AppTest.from_file(str(PROJECT_ROOT / "streamlit_app.py"), default_timeout=20)
+    app.secrets["GOOGLE_PLACES_API_KEY"] = "fixture-key"
+    app.run()
+    assert not app.exception
+    assert any("quota" in warning.value for warning in app.warning)
+
+
+def test_public_policy_links_are_required_for_live_sources_and_unsafe_links_are_rejected(monkeypatch):
+    monkeypatch.setattr(PlacesClient, "search_destination", lambda *args, **kwargs: live_places())
+    app = AppTest.from_file(str(PROJECT_ROOT / "streamlit_app.py"), default_timeout=20)
+    app.secrets["GOOGLE_PLACES_API_KEY"] = "fixture-key"
+    app.secrets["TERMS_OF_USE_URL"] = "javascript:bad"
+    app.secrets["PRIVACY_POLICY_URL"] = "https://example.org/privacy"
+    app.run()
+    assert any("Before public deployment" in warning.value for warning in app.warning)
+    app.secrets["TERMS_OF_USE_URL"] = "https://example.org/terms"
+    app.run()
+    assert not app.exception
+    assert not any("Before public deployment" in warning.value for warning in app.warning)
+    links = app.get("link_button")
+    assert any(link.label == "Terms of Use" for link in links)
+    assert any(link.label == "Privacy Policy" for link in links)
