@@ -17,6 +17,8 @@ from typing import Dict, List
 from src.data_pipeline.storage import deduplicate_posts, load_location_posts, location_slug, validate_extraction_summary
 from src.utils.content import calculate_costs, classify_sentiment, normalize_place, safe_html, safe_url
 from src.utils.helpers import PROJECT_ROOT, load_config
+from src.services.demo_data import demo_places
+from src.web.trip_planner import render_trip_planner
 
 # Import optional dependencies with error handling
 try:
@@ -967,17 +969,18 @@ def main():
         selected_location = st.selectbox(
             "Choose your destination:",
             DESTINATIONS,
-            index=0
+            index=0, key='destination',
         )
 
         st.subheader("Display Options")
-        show_restaurants = st.checkbox("🍽️ Show Restaurants", value=True)
-        show_attractions = st.checkbox("🏛️ Show Attractions", value=True)
-        show_reddit = st.checkbox("📝 Show Reddit Insights", value=True)
-        show_costs = st.checkbox("💰 Show Cost Estimates", value=True)
+        show_restaurants = st.checkbox("🍽️ Show Restaurants", value=True, key='show_restaurants')
+        show_attractions = st.checkbox("🏛️ Show Attractions", value=True, key='show_attractions')
+        show_reddit = st.checkbox("📝 Show Reddit Insights", value=True, key='show_reddit')
+        show_costs = st.checkbox("💰 Show Cost Estimates", value=True, key='show_costs')
 
         st.subheader("Data Options")
         demo_mode = st.checkbox('Use demo data', value=False, key='demo_mode')
+        show_planner = st.checkbox('Show Trip Planner', value=True, key='show_planner')
 
         data_source_option = st.radio(
             'Reddit Data Source:', ['Use Stored Data', 'Extract Fresh Data'],
@@ -988,7 +991,7 @@ def main():
         max_posts = st.slider('Max posts to extract:', 10, 50, 20) if use_fresh_reddit else 20
         st.button(
             '🔄 Extract Fresh Reddit Data', key='fetch_reddit', on_click=request_reddit_refresh,
-            disabled=not api_status['reddit'] or demo_mode or not show_reddit,
+            disabled=not api_status['reddit'] or demo_mode or not (show_reddit or show_planner),
         )
         fresh_request = st.session_state.pop('refresh_reddit', False)
 
@@ -1039,7 +1042,10 @@ def main():
 
             # Get Google Places data
             places_data = None
-            if api_status['google'] and (show_restaurants or show_attractions):
+            if demo_mode:
+                places_data = demo_places(selected_location)
+                data_source_places = 'Fictional demo places'
+            elif api_status['google'] and (show_restaurants or show_attractions or show_planner):
                 places_data = get_google_places_data(selected_location)
                 data_source_places = "Google Places"
             else:
@@ -1049,7 +1055,7 @@ def main():
             reddit_posts = []
             data_source_reddit = "No Data"
 
-            if show_reddit:
+            if show_reddit or show_planner:
                 if use_fresh_reddit:
                     snapshots = st.session_state.setdefault('fresh_reddit_posts', {})
                     snapshot_key = (selected_location, max_posts)
@@ -1088,6 +1094,13 @@ def main():
 
         if show_costs:
             display_costs(selected_location)
+
+        if show_planner:
+            render_trip_planner(
+                selected_location, reddit_posts, places_data, demo_mode=demo_mode,
+                api_key=get_environment_value('OPENAI_API_KEY'),
+                model_name=get_environment_value('OPENAI_MODEL') or 'gpt-4.1-mini',
+            )
 
         if show_reddit:
             if reddit_posts:
