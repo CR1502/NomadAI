@@ -16,6 +16,8 @@ def isolate_providers(monkeypatch, tmp_path):
         'REDDIT_CLIENT_ID', 'REDDIT_CLIENT_SECRET', 'REDDIT_USER_AGENT',
         'GOOGLE_PLACES_API_KEY', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
         'AWS_SESSION_TOKEN', 'S3_BUCKET_NAME', 'OPENAI_API_KEY', 'OPENAI_MODEL',
+        'NOMADAI_AI_PROVIDER', 'OLLAMA_MODEL', 'OLLAMA_BASE_URL',
+        'GOOGLE_PLACES_DETAIL_LEVEL', 'PRIVACY_POLICY_URL', 'TERMS_OF_USE_URL',
     ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv('NOMADAI_DATA_DIR', str(tmp_path / 'data'))

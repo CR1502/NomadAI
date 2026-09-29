@@ -7,10 +7,20 @@ from ..utils.helpers import load_config
 
 
 class TripPlanningService:
-    def __init__(self, *, api_key: str = "", model_name: str | None = None, embedding_model=None):
+    def __init__(
+        self,
+        *,
+        api_key: str = "",
+        model_name: str | None = None,
+        embedding_model=None,
+        provider: str = "openai",
+        ollama_base_url: str | None = None,
+    ):
         self.api_key = api_key
         self.model_name = model_name
         self.embedding_model = embedding_model
+        self.provider = provider
+        self.ollama_base_url = ollama_base_url
 
     def generate(
         self,
@@ -28,7 +38,11 @@ class TripPlanningService:
             embedding_model=self.embedding_model,
         ).retrieve(posts, location, preferences, include_demo=demo_mode)
         planner = AITripPlanner(
-            api_key=self.api_key, model_name=self.model_name, use_ai=use_ai and not demo_mode
+            api_key=self.api_key,
+            model_name=self.model_name,
+            use_ai=use_ai and not demo_mode,
+            provider=self.provider,
+            ollama_base_url=self.ollama_base_url,
         )
         result = planner.generate_personalized_itinerary(
             location,
@@ -41,6 +55,10 @@ class TripPlanningService:
         if use_ai and not demo_mode and planner.client is None:
             result["generation_warning"] = (
                 "AI is not configured or its optional package is unavailable; using local planning."
+            )
+        elif use_ai and not demo_mode and not result["ai_generated"] and not result.get("generation_warning"):
+            result["generation_warning"] = (
+                "No eligible places are available; model generation was skipped to avoid inventing venues."
             )
         return {
             **result,

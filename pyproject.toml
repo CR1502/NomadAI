@@ -23,6 +23,10 @@ dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
 
+[tool.uv]
+# Dependencies are dynamic: requirements changes must invalidate build metadata.
+cache-keys = [{file = "pyproject.toml"}, {file = "requirements.txt"}]
+
 [tool.setuptools.packages.find]
 include = ["src*"]
 namespaces = true
