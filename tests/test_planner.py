@@ -33,7 +33,7 @@ def test_current_api_uses_structured_output_and_validates_sources(sample_posts):
     planner = AITripPlanner()
     create = Mock(return_value=SimpleNamespace(output_text=json.dumps(draft_payload([sample_posts[0]['url']]))))
     planner.client = SimpleNamespace(responses=SimpleNamespace(create=create))
-    posts = [{**post, 'quality_score': 80} for post in sample_posts]
+    posts = [{**post, 'quality_score': 80, 'text': post['text'] + ' I visited Test Museum in Paris.'} for post in sample_posts]
     result = planner.generate_personalized_itinerary('Paris', posts, {'duration': 1}, attractions=[{'name': 'Test Museum'}])
     assert result['ai_generated'] is True
     request = create.call_args.kwargs
@@ -115,3 +115,42 @@ def test_context_excludes_demo_and_other_destinations_and_ranks_quality():
     assert context.index('Higher quality') < context.index('Lower quality')
     assert 'Other city' not in context
     assert 'Invented sample' not in context
+
+
+def test_ai_cannot_cite_a_discussion_that_does_not_name_its_place(sample_posts):
+    planner = AITripPlanner()
+    planner.client = SimpleNamespace(responses=SimpleNamespace(
+        create=lambda **kwargs: SimpleNamespace(output_text=json.dumps(draft_payload([sample_posts[0]['url']]))),
+    ))
+    result = planner.generate_personalized_itinerary(
+        'Paris', [{**post, 'quality_score': 80} for post in sample_posts], {'duration': 1}, attractions=[{'name': 'Test Museum'}],
+    )
+    assert result['ai_generated'] is False
+    assert result['generation_warning']
+
+
+@pytest.mark.parametrize('invalid', ['pace', 'time', 'type', 'price'])
+def test_ai_drafts_must_respect_local_constraints(invalid):
+    planner = AITripPlanner()
+    payload = draft_payload()
+    preferences = {'duration': 1}
+    attractions = [{'name': 'Test Museum', 'price_level': 4}, {'name': 'Other Museum'}, {'name': 'Third Museum'}]
+    if invalid == 'pace':
+        preferences['pace'] = 'relaxed'
+        base = payload['days'][0]['activities'][0]
+        payload['days'][0]['activities'] = [
+            {**base, 'activity': name, 'time': time}
+            for name, time in [('Test Museum', '9:00 AM'), ('Other Museum', '11:00 AM'), ('Third Museum', '3:00 PM')]
+        ]
+    elif invalid == 'time':
+        payload['days'][0]['activities'].append({**payload['days'][0]['activities'][0], 'activity': 'Other Museum', 'time': '8:00 AM'})
+    elif invalid == 'type':
+        payload['days'][0]['activities'][0]['type'] = 'restaurant'
+    else:
+        preferences['max_price_level'] = 0
+    planner.client = SimpleNamespace(responses=SimpleNamespace(
+        create=lambda **kwargs: SimpleNamespace(output_text=json.dumps(payload)),
+    ))
+    result = planner.generate_personalized_itinerary('Paris', [], preferences, attractions=attractions)
+    assert result['ai_generated'] is False
+    assert result['generation_warning']

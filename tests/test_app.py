@@ -27,9 +27,9 @@ def write_local_posts(tmp_path, posts, demo=False):
 def test_app_starts_without_credentials_and_has_all_destinations():
     app = run_app().run()
     assert not app.exception
-    assert len(app.selectbox[0].options) == 25
-    assert 'Hong Kong' in app.selectbox[0].options
-    app.selectbox[0].select('Hong Kong').run()
+    assert len(app.selectbox(key='destination').options) == 25
+    assert 'Hong Kong' in app.selectbox(key='destination').options
+    app.selectbox(key='destination').select('Hong Kong').run()
     assert not app.exception
     assert any('No budget estimate' in info.value for info in app.info)
 
@@ -109,10 +109,10 @@ def test_refresh_runs_on_request_and_survives_unrelated_reruns(monkeypatch):
     assert not app.exception
     assert search.call_count == 6
     assert any('Fresh Reddit snapshot (1 posts)' in item.value for item in app.markdown)
-    app.checkbox[3].uncheck().run()
+    app.checkbox(key='show_costs').uncheck().run()
     assert not app.exception
     assert search.call_count == 6
-    app.selectbox[0].select('Tokyo').run()
+    app.selectbox(key='destination').select('Tokyo').run()
     assert not app.exception
     assert search.call_count == 6
 

@@ -7,10 +7,10 @@ import json
 import logging
 import numpy as np
 from typing import List, Dict, Any, Optional
-from sentence_transformers import SentenceTransformer
-import pickle
-import os
-from datetime import datetime
+from pathlib import Path
+from datetime import datetime, timezone
+
+from ..utils.content import post_comments
 
 logger = logging.getLogger(__name__)
 
@@ -18,19 +18,22 @@ logger = logging.getLogger(__name__)
 class EmbeddingModel:
     """Creates and manages text embeddings for lifestyle content."""
 
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2", *, encoder=None):
         """Initialize the embedding model."""
         self.model_name = model_name
-        self.model = None
+        self.model = encoder
         self.embeddings = None
         self.texts = None
         self.metadata = None
 
-        self.load_model()
+        if self.model is None:
+            self.load_model()
 
     def load_model(self):
         """Load the sentence transformer model."""
         try:
+            from sentence_transformers import SentenceTransformer
+
             logger.info(f"Loading embedding model: {self.model_name}")
             self.model = SentenceTransformer(self.model_name)
             logger.info("Embedding model loaded successfully")
@@ -46,6 +49,10 @@ class EmbeddingModel:
         with open(posts_file, 'r', encoding='utf-8') as f:
             posts = json.load(f)
 
+        return self.create_embeddings(posts)
+
+    def create_embeddings(self, posts: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Index request-local posts, retaining their evidence and normalized vectors."""
         logger.info(f"Loaded {len(posts)} posts for embedding")
 
         # Prepare texts for embedding
@@ -54,30 +61,24 @@ class EmbeddingModel:
 
         for post in posts:
             # Combine title and cleaned text for better context
-            combined_text = f"{post.get('title', '')} {post.get('cleaned_text', '')}"
+            comments = ' '.join(comment['body'] for comment in post_comments(post)[:3])
+            combined_text = f"{post.get('title', '')} {post.get('cleaned_text') or post.get('text', '')} {comments}"
             texts.append(combined_text.strip())
 
             # Store metadata for each post
-            metadata.append({
-                'id': post.get('id'),
-                'title': post.get('title'),
-                'category': post.get('category'),
-                'locations': post.get('locations', []),
-                'sentiment_label': post.get('sentiment_label'),
-                'quality_score': post.get('quality_score'),
-                'subreddit': post.get('subreddit'),
-                'score': post.get('score'),
-                'word_count': post.get('word_count')
-            })
+            metadata.append(dict(post))
 
         # Create embeddings
         logger.info("Creating embeddings (this may take a few minutes)...")
         embeddings = self.model.encode(
             texts,
             batch_size=32,
-            show_progress_bar=True,
-            convert_to_numpy=True
-        )
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        ) if texts else np.empty((0, 0))
+        embeddings = self._normalize_vectors(embeddings)
+        if len(embeddings) != len(metadata):
+            raise ValueError('The encoder returned an inconsistent number of vectors')
 
         # Store the data
         self.embeddings = embeddings
@@ -91,23 +92,48 @@ class EmbeddingModel:
             'texts': texts,
             'metadata': metadata,
             'model_name': self.model_name,
-            'created_at': datetime.now().isoformat()
+            'created_at': datetime.now(timezone.utc).isoformat()
         }
+
+    @staticmethod
+    def _normalize_vectors(vectors):
+        vectors = np.asarray(vectors, dtype=float)
+        if vectors.ndim != 2 or not np.isfinite(vectors).all():
+            raise ValueError('Embeddings must be a finite two-dimensional numeric array')
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        return np.divide(vectors, norms, out=np.zeros_like(vectors), where=norms != 0)
 
     def save_embeddings(self, data: Dict[str, Any], filename: str):
         """Save embeddings and metadata to file."""
-        os.makedirs(os.path.dirname(filename), exist_ok=True)
-
-        with open(filename, 'wb') as f:
-            pickle.dump(data, f)
+        path = Path(filename)
+        if path.suffix != '.npz':
+            raise ValueError('Use .npz archives; pickle embedding files are no longer supported')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('wb') as handle:
+            np.savez_compressed(
+                handle, embeddings=self._normalize_vectors(data['embeddings']),
+                texts=np.asarray(data['texts'], dtype=str), metadata=np.asarray(json.dumps(data['metadata'])),
+                model_name=np.asarray(data.get('model_name', self.model_name)),
+                created_at=np.asarray(data.get('created_at', datetime.now(timezone.utc).isoformat())),
+            )
 
         logger.info(f"Saved embeddings to {filename}")
 
     def load_embeddings(self, filename: str) -> Dict[str, Any]:
         """Load embeddings and metadata from file."""
         try:
-            with open(filename, 'rb') as f:
-                data = pickle.load(f)
+            if Path(filename).suffix != '.npz':
+                raise ValueError('Rebuild legacy pickle files as .npz archives')
+            with np.load(filename, allow_pickle=False) as archive:
+                data = {
+                    'embeddings': self._normalize_vectors(archive['embeddings']),
+                    'texts': archive['texts'].tolist(), 'metadata': json.loads(str(archive['metadata'].item())),
+                    'model_name': str(archive['model_name'].item()), 'created_at': str(archive['created_at'].item()),
+                }
+            if data['model_name'] != self.model_name:
+                raise ValueError('The saved index uses a different embedding model')
+            if len(data['embeddings']) != len(data['texts']) or len(data['texts']) != len(data['metadata']):
+                raise ValueError('The saved index has inconsistent metadata lengths')
 
             self.embeddings = data['embeddings']
             self.texts = data['texts']
@@ -130,12 +156,16 @@ class EmbeddingModel:
     ) -> List[Dict[str, Any]]:
         """Find similar posts to a query."""
 
-        if self.embeddings is None or self.texts is None:
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 0:
+            raise ValueError('top_k must be a non-negative integer')
+        if top_k == 0 or self.embeddings is None or self.texts is None or not len(self.embeddings):
             logger.error("No embeddings loaded. Call create_embeddings_from_posts() first.")
             return []
 
         # Create query embedding
-        query_embedding = self.model.encode([query])
+        query_embedding = self._normalize_vectors(self.model.encode([query], convert_to_numpy=True))
+        if query_embedding.shape != (1, self.embeddings.shape[1]):
+            raise ValueError('Query and index embedding dimensions differ')
 
         # Calculate similarities
         similarities = np.dot(self.embeddings, query_embedding.T).flatten()
@@ -164,12 +194,14 @@ class EmbeddingModel:
 
             # Location filter
             if location_filter:
-                locations = metadata.get('locations', [])
-                if not any(location_filter.lower() in loc.lower() for loc in locations):
+                locations = [metadata['target_location']] if metadata.get('target_location') else (
+                    metadata.get('locations') or metadata.get('detected_locations') or []
+                )
+                if not any(location_filter.casefold() == loc.casefold() for loc in locations):
                     continue
 
             # Quality filter
-            if min_quality_score and metadata.get('quality_score', 0) < min_quality_score:
+            if min_quality_score is not None and metadata.get('quality_score', 0) < min_quality_score:
                 continue
 
             filtered_results.append(result)
@@ -208,8 +240,10 @@ class EmbeddingModel:
 
         location_posts = []
         for i, metadata in enumerate(self.metadata):
-            locations = metadata.get('locations', [])
-            if any(location.lower() in loc.lower() for loc in locations):
+            locations = [metadata['target_location']] if metadata.get('target_location') else (
+                metadata.get('locations') or metadata.get('detected_locations') or []
+            )
+            if any(location.casefold() == loc.casefold() for loc in locations):
                 result = {
                     'text': self.texts[i],
                     'metadata': metadata,
@@ -233,7 +267,7 @@ class EmbeddingModel:
             'model_name': self.model_name,
             'categories': list(set(m.get('category') for m in self.metadata)),
             'total_locations': len(set(loc for m in self.metadata for loc in m.get('locations', []))),
-            'average_quality_score': np.mean([m.get('quality_score', 0) for m in self.metadata])
+            'average_quality_score': float(np.mean([m.get('quality_score', 0) for m in self.metadata])) if self.metadata else 0.0
         }
 
 
@@ -254,7 +288,7 @@ if __name__ == "__main__":
     # Save embeddings
     embedding_model.save_embeddings(
         embeddings_data,
-        'models/compressed/lifestyle_embeddings.pkl'
+        'models/compressed/lifestyle_embeddings.npz'
     )
 
     # Test similarity search

@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -10,6 +11,11 @@ from dotenv import load_dotenv
 
 from ..utils.helpers import PROJECT_ROOT
 from ..data_pipeline.storage import is_demo_post
+from ..utils.content import post_comments, safe_url
+from .local_planner import activity_details, budget_notes, build_local_itinerary
+from .place_ranking import rank_places
+from .post_retriever import belongs_to_destination
+from .trip_preferences import TripPreferences
 
 load_dotenv(PROJECT_ROOT / '.env')
 load_dotenv(PROJECT_ROOT / 'docker' / '.env')
@@ -54,13 +60,15 @@ ITINERARY_SCHEMA = {
 class AITripPlanner:
     """Generate structured drafts; no API key is needed for a basic local plan."""
 
-    def __init__(self):
+    def __init__(self, *, api_key: str | None = None, model_name: str | None = None, use_ai: bool = True):
         self.client = None
-        self.model_name = os.getenv('OPENAI_MODEL', 'gpt-4.1-mini')
-        self.setup_openai()
+        self.model_name = model_name or os.getenv('OPENAI_MODEL', 'gpt-4.1-mini')
+        self.api_key = os.getenv('OPENAI_API_KEY') if api_key is None else api_key
+        if use_ai:
+            self.setup_openai()
 
     def setup_openai(self):
-        api_key = os.getenv('OPENAI_API_KEY')
+        api_key = self.api_key
         if not api_key:
             return
         try:
@@ -78,27 +86,31 @@ class AITripPlanner:
         for post in posts:
             if is_demo_post(post):
                 continue
-            target = post.get('target_location')
-            locations = post.get('locations', post.get('detected_locations', []))
-            if target and target.casefold() != location.casefold():
+            if not belongs_to_destination(post, location):
                 continue
-            if not target and locations and not any(place.casefold() == location.casefold() for place in locations):
+            quality = post.get('enhanced_quality_score')
+            if quality is None:
+                quality = post.get('quality_score', 0)
+            if isinstance(quality, bool) or not isinstance(quality, (int, float)) or not math.isfinite(quality):
                 continue
-            quality = post.get('enhanced_quality_score', post.get('quality_score', 0))
-            if quality >= 40:
-                quality_posts.append(post)
-        quality_posts.sort(key=lambda post: post.get('enhanced_quality_score', post.get('quality_score', 0)), reverse=True)
+            if 40 <= quality <= 100:
+                quality_posts.append({**post, 'quality_score': quality})
+        quality_posts.sort(key=lambda post: (
+            post.get('retrieval_score', 0), post['quality_score']
+        ), reverse=True)
         return quality_posts[:15]
 
     def create_reddit_context(self, posts: list[dict[str, Any]], location: str) -> str:
         """Accept either processing schema, rank evidence, and retain source links."""
         context = [f'Community evidence about {location}:']
         for index, post in enumerate(self._select_reddit_evidence(posts, location), 1):
-            sentiment = post.get('enhanced_sentiment', {}).get('sentiment_label', post.get('sentiment_label', 'neutral'))
-            comments = ' '.join(comment.get('body', '')[:300] for comment in post.get('top_comments', [])[:2])
+            enhanced_sentiment = post.get('enhanced_sentiment')
+            enhanced_sentiment = enhanced_sentiment if isinstance(enhanced_sentiment, dict) else {}
+            sentiment = enhanced_sentiment.get('sentiment_label', post.get('sentiment_label', 'neutral'))
+            comments = ' '.join(comment['body'][:300] for comment in post_comments(post)[:2])
             context.append(
                 f"{index}. {post.get('title', 'Untitled')} (sentiment: {sentiment})\n"
-                f"{(post.get('summary') or post.get('text', ''))[:500]}\n"
+                f"{str(post.get('summary') or post.get('text') or '')[:500]}\n"
                 f"Comments: {comments}\nSource: {post.get('url', 'No source link')}"
             )
         return '\n\n'.join(context)
@@ -106,14 +118,20 @@ class AITripPlanner:
     def generate_personalized_itinerary(
         self, location: str, reddit_posts: list[dict[str, Any]], user_preferences: dict[str, Any],
         restaurants: list[dict] | None = None, attractions: list[dict] | None = None,
+        *, demo_mode: bool = False,
     ) -> dict[str, Any]:
-        duration = user_preferences.get('duration', 3)
-        if isinstance(duration, bool) or not isinstance(duration, int) or not 1 <= duration <= 30:
-            raise ValueError('Trip duration must be an integer from 1 to 30 days')
-        if not self.client:
-            return self._generate_fallback_itinerary(location, user_preferences, restaurants, attractions)
-        context = self.create_reddit_context(reddit_posts, location)
-        prompt = self._build_itinerary_prompt(location, user_preferences, context, restaurants, attractions)
+        preferences = TripPreferences.from_dict(user_preferences)
+        evidence = self._select_reddit_evidence(reddit_posts, location)
+        places, excluded = rank_places(restaurants or [], attractions or [], preferences, evidence, include_demo=demo_mode)
+        fallback = build_local_itinerary(location, preferences, places, excluded)
+        if not self.client or demo_mode or not places:
+            return fallback
+        context = self.create_reddit_context(evidence, location)
+        prompt = self._build_itinerary_prompt(
+            location, preferences.to_dict(), context,
+            [place for place in places if place['type'] == 'restaurant'],
+            [place for place in places if place['type'] == 'attraction'],
+        )
         try:
             response = self.client.responses.create(
                 model=self.model_name,
@@ -127,28 +145,42 @@ class AITripPlanner:
                 max_output_tokens=5000,
                 store=False,
             )
-            result = self._parse_ai_response(response.output_text, location, user_preferences)
+            result = self._parse_ai_response(response.output_text, location, preferences.to_dict())
             allowed_sources = {
-                post['url'] for post in self._select_reddit_evidence(reddit_posts, location) if post.get('url')
+                post['url'] for post in evidence if safe_url(post.get('url')) != '#'
             }
-            allowed_places = {place['name'] for place in (restaurants or []) + (attractions or [])}
+            allowed_places = {place['name']: place for place in places}
             visited_places = set()
             for day in result['days']:
+                if len(day['activities']) > preferences.activities_per_day:
+                    raise ValueError('Generated itinerary exceeds the requested pace')
+                previous_time = -1
                 for activity in day['activities']:
                     if not set(activity['source_urls']).issubset(allowed_sources):
                         raise ValueError('Generated itinerary contains an unknown source link')
-                    if activity['type'] in ('restaurant', 'attraction') and activity['activity'] not in allowed_places:
+                    if activity['activity'] not in allowed_places:
                         raise ValueError('Generated itinerary contains an unknown place')
-                    if activity['type'] in ('restaurant', 'attraction'):
-                        if activity['activity'] in visited_places:
-                            raise ValueError('Generated itinerary repeats a place')
-                        visited_places.add(activity['activity'])
+                    place = allowed_places[activity['activity']]
+                    if activity['type'] != place['type']:
+                        raise ValueError('Generated itinerary misclassifies a place')
+                    if activity['activity'] in visited_places:
+                        raise ValueError('Generated itinerary repeats a place')
+                    visited_places.add(activity['activity'])
+                    mentioned_sources = {mention['url'] for mention in place['community_mentions']}
+                    if not set(activity['source_urls']).issubset(mentioned_sources):
+                        raise ValueError('A source does not mention the cited place')
+                    visit_time = datetime.strptime(activity['time'].strip().upper(), '%I:%M %p')
+                    minutes = visit_time.hour * 60 + visit_time.minute
+                    if minutes <= previous_time:
+                        raise ValueError('Generated activities are not in chronological order')
+                    previous_time = minutes
+                    activity.update(activity_details(place))
+            result['budget_notes'] = list(dict.fromkeys(budget_notes(location, preferences, excluded) + result['budget_notes']))
             return result
         except Exception:
             logger.exception('AI draft generation failed; using a basic local plan')
-            result = self._generate_fallback_itinerary(location, user_preferences, restaurants, attractions)
-            result['generation_warning'] = 'AI generation was unavailable or returned an invalid draft.'
-            return result
+            fallback['generation_warning'] = 'AI generation was unavailable or returned an invalid draft.'
+            return fallback
 
     def _build_itinerary_prompt(self, location, preferences, reddit_context, restaurants=None, attractions=None):
         return (
@@ -159,7 +191,10 @@ class AITripPlanner:
             f"{reddit_context}\n\n"
             'Return JSON matching the supplied schema. Use exact names for supplied places and only supplied '
             'source URLs. Leave source_urls empty where no evidence supports an activity. Avoid repeated '
-            'places. If evidence is insufficient, say so. Do not claim the draft has verified hours or routing.'
+            f'places, schedule at most {TripPreferences.from_dict(preferences).activities_per_day} activities per day, '
+            'and use increasing times formatted as h:mm AM/PM. Every activity must use an exact available place '
+            'name and its supplied type. Cite only discussions in that place\'s community_mentions. If evidence '
+            'is insufficient, leave activity slots empty. Do not claim verified hours, routing, accessibility, or costs.'
         )
 
     def _parse_ai_response(self, ai_response: str, location: str, preferences: dict) -> dict:
@@ -178,25 +213,6 @@ class AITripPlanner:
         }
 
     def _generate_fallback_itinerary(self, location, preferences, restaurants=None, attractions=None):
-        def unique_places(places):
-            return list({place.get('place_id') or place['name']: place for place in places or []}.values())
-
-        restaurants, attractions = unique_places(restaurants), unique_places(attractions)
-        days = []
-        for index in range(preferences.get('duration', 3)):
-            activities = []
-            for places, activity_type, visit_time in ((attractions, 'attraction', '9:30 AM'), (restaurants, 'restaurant', '12:30 PM')):
-                if index < len(places):
-                    place = places[index]
-                    activities.append({
-                        'time': visit_time, 'activity': place['name'], 'type': activity_type,
-                        'description': 'Suggested from the available place data; confirm availability before visiting.',
-                        'source_urls': [], 'place_id': place.get('place_id'),
-                    })
-            days.append({'day': index + 1, 'title': f'Day {index + 1} in {location}', 'activities': activities})
-        return {
-            'location': location, 'user_preferences': preferences, 'days': days,
-            'reddit_tips': [], 'budget_notes': ['Actual costs must be checked for your travel dates.'],
-            'generated_at': datetime.now(timezone.utc).isoformat(), 'ai_generated': False,
-            'limitations': ['Basic place outline: preferences, opening hours, and routing are not optimized.'],
-        }
+        preferences = TripPreferences.from_dict(preferences)
+        places, excluded = rank_places(restaurants or [], attractions or [], preferences, [])
+        return build_local_itinerary(location, preferences, places, excluded)

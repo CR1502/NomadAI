@@ -42,6 +42,14 @@ def safe_url(value: Any) -> str:
     return safe_html(value)
 
 
+def post_comments(post: dict) -> list[dict]:
+    """Ignore malformed optional comments instead of crashing retrieval or planning."""
+    comments = post.get('top_comments')
+    if not isinstance(comments, list):
+        return []
+    return [comment for comment in comments if isinstance(comment, dict) and isinstance(comment.get('body'), str)]
+
+
 def calculate_costs(components: dict[str, int | float]) -> dict[str, int | float]:
     """Derive totals from the displayed components; do not trust a separate total."""
     costs = {name: components[name] for name in COST_COMPONENTS}
@@ -89,6 +97,8 @@ def normalize_place(place: dict, details: dict | None = None) -> dict:
     review_count = details.get('user_ratings_total', place.get('user_ratings_total', 0))
     if isinstance(review_count, bool) or not isinstance(review_count, int) or review_count < 0:
         review_count = 0
+    types = details.get('types', place.get('types', []))
+    types = [value for value in types if isinstance(value, str)] if isinstance(types, (list, tuple)) else []
     return {
         'place_id': place.get('place_id'),
         'name': details.get('name') or place.get('name', 'Unnamed place'),
@@ -99,4 +109,5 @@ def normalize_place(place: dict, details: dict | None = None) -> dict:
         'address': details.get('formatted_address') or place.get('vicinity', 'Address not available'),
         'website': details.get('website', 'Not available'),
         'phone': details.get('formatted_phone_number', 'Not available'),
+        'types': types,
     }
